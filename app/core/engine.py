@@ -30,6 +30,7 @@ from app.modules.git_guard import (
 from app.modules.patch_git import apply_patch, commit_changes, push_to_main
 from app.modules.tests_runner import run_tests
 from app.modules.repo_context import scan_repository
+from app.modules.governance import GovernanceValidator, ViolationSeverity
 
 
 class Engine:
@@ -113,13 +114,16 @@ class Engine:
         )
         
         try:
+            # Initialize governance_warnings
+            governance_warnings = []
+
             # Step 1: Validate git state
             require_remote = os.getenv("REQUIRE_REMOTE", "true").lower() == "true"
             validate_git_state(str(self.repo_path), require_remote=require_remote)
-            
+
             # Step 2: Get git log
             last_commits = get_last_commits(str(self.repo_path), count=5)
-            
+
             # Step 3: Validate diff
             if not request.diff:
                 return create_error_response(
@@ -144,7 +148,50 @@ class Engine:
                     validation_result=validation_result
                 )
             
-            # Step 4: Validate push safety
+            # Step 4: Governance validation
+            diff_metadata = parse_diff_metadata(request.diff)
+            governance_result = GovernanceValidator.validate_diff(
+                diff_content=request.diff,
+                description=request.description,
+                files_in_diff=diff_metadata.file_paths
+            )
+
+            # Capture warnings for success response
+            governance_warnings = governance_result.warnings
+
+            if governance_result.violations:
+                log_operation(
+                    task_id=request.task_id,
+                    mode=mode,
+                    operation="governance_check",
+                    status="Working" if governance_result.passed else "Broken",
+                    governance_violations=[
+                        {"rule": v.rule_id, "message": v.message, "severity": v.severity.value}
+                        for v in governance_result.violations
+                    ]
+                )
+
+                # CRITICAL mode: block on severe violations
+                if mode == "CRITICAL" and governance_result.has_severe:
+                    severe_violations = [v for v in governance_result.violations if v.severity == ViolationSeverity.SEVERE]
+                    return create_error_response(
+                        task_id=request.task_id,
+                        mode=mode,
+                        error=f"Governance violations (CRITICAL mode blocks severe): {', '.join(v.message for v in severe_violations)}",
+                        validation_result=validation_result
+                    )
+
+                # RAPID mode: block on severe violations
+                if mode == "RAPID" and governance_result.has_severe:
+                    severe_violations = [v for v in governance_result.violations if v.severity == ViolationSeverity.SEVERE]
+                    return create_error_response(
+                        task_id=request.task_id,
+                        mode=mode,
+                        error=f"Governance violations (severe): {', '.join(v.message for v in severe_violations)}",
+                        validation_result=validation_result
+                    )
+
+            # Step 5: Validate push safety
             safe, reason = validate_push_safety(
                 mode=mode,
                 files_changed=validation_result.files_changed,
@@ -232,6 +279,9 @@ class Engine:
             else:
                 summary += "Changes committed locally. Manual push required."
 
+            if governance_warnings:
+                summary += f" Governance warnings: {len(governance_warnings)}."
+
             log_operation(
                 task_id=request.task_id,
                 mode=mode,
@@ -240,7 +290,8 @@ class Engine:
                 commit_sha=commit_sha,
                 files_changed=validation_result.files_changed,
                 lines_changed=validation_result.lines_added + validation_result.lines_removed,
-                pushed=pushed
+                pushed=pushed,
+                governance_warnings=governance_warnings
             )
 
             return create_success_response(
@@ -253,7 +304,8 @@ class Engine:
                 validation_result=validation_result,
                 pre_test_result=pre_test_result,
                 post_test_result=post_test_result,
-                pushed=pushed
+                pushed=pushed,
+                governance_warnings=governance_warnings if governance_warnings else None
             )
             
         except Exception as e:

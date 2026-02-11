@@ -72,6 +72,7 @@ class ExecuteResponse(BaseModel):
     pushed: bool = False
     verify_steps: List[str] = Field(default_factory=list)
     rollback_command: Optional[str] = None
+    governance_warnings: Optional[List[str]] = None
     error: Optional[str] = None
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 

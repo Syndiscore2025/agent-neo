@@ -71,7 +71,8 @@ def create_success_response(
     validation_result: ValidationResult,
     pre_test_result: Optional[TestResult],
     post_test_result: Optional[TestResult],
-    pushed: bool
+    pushed: bool,
+    governance_warnings: Optional[List[str]] = None
 ) -> ExecuteResponse:
     """
     Create success response.
@@ -87,6 +88,7 @@ def create_success_response(
         pre_test_result: Pre-apply test result
         post_test_result: Post-apply test result
         pushed: Whether changes were pushed
+        governance_warnings: Optional governance warnings
 
     Returns:
         ExecuteResponse object
@@ -115,7 +117,8 @@ def create_success_response(
         post_test_result=post_test_result,
         pushed=pushed,
         verify_steps=verify_steps,
-        rollback_command=rollback_command
+        rollback_command=rollback_command,
+        governance_warnings=governance_warnings
     )
 
 
