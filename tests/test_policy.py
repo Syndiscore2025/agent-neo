@@ -66,3 +66,23 @@ def test_validate_push_safety_critical_too_many_lines():
     assert safe == False
     assert "5000" in reason
 
+
+def test_validate_push_safety_critical_too_many_files():
+    """Test push safety validation for CRITICAL mode with too many files."""
+    safe, reason = validate_push_safety("CRITICAL", files_changed=60, lines_changed=100)
+    assert safe == False
+    assert "50" in reason
+
+
+def test_should_auto_push_unknown_mode():
+    """Test should_auto_push with unknown mode."""
+    # Unknown mode should return False
+    result = should_auto_push("UNKNOWN", force=False)
+    assert result == False
+
+
+def test_get_push_policy_message_unknown_mode():
+    """Test get_push_policy_message with unknown mode."""
+    msg = get_push_policy_message("UNKNOWN", force=False)
+    assert "Unknown" in msg
+
