@@ -71,11 +71,12 @@ def create_success_response(
     validation_result: ValidationResult,
     pre_test_result: Optional[TestResult],
     post_test_result: Optional[TestResult],
-    pushed: bool
+    pushed: bool,
+    governance_warnings: Optional[List[str]] = None
 ) -> ExecuteResponse:
     """
     Create success response.
-    
+
     Args:
         task_id: Task identifier
         mode: Execution mode
@@ -87,21 +88,22 @@ def create_success_response(
         pre_test_result: Pre-apply test result
         post_test_result: Post-apply test result
         pushed: Whether changes were pushed
-        
+        governance_warnings: Optional list of governance warnings
+
     Returns:
         ExecuteResponse object
     """
     rollback_command = f"git revert {commit_sha} --no-edit && git push origin main"
-    
+
     verify_steps = [
         f"git show {commit_sha}",
         f"git log -1 {commit_sha}",
         "git status",
     ]
-    
+
     if pushed:
         verify_steps.append("git log origin/main -1")
-    
+
     return ExecuteResponse(
         status="Working",
         task_id=task_id,
@@ -115,7 +117,8 @@ def create_success_response(
         post_test_result=post_test_result,
         pushed=pushed,
         verify_steps=verify_steps,
-        rollback_command=rollback_command
+        rollback_command=rollback_command,
+        governance_warnings=governance_warnings
     )
 
 
