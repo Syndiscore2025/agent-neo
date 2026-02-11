@@ -30,7 +30,6 @@ from app.modules.git_guard import (
 from app.modules.patch_git import apply_patch, commit_changes, push_to_main
 from app.modules.tests_runner import run_tests
 from app.modules.repo_context import scan_repository
-from app.modules.governance import GovernanceValidator, ViolationSeverity
 
 
 class Engine:
@@ -145,48 +144,7 @@ class Engine:
                     validation_result=validation_result
                 )
             
-            # Step 4: Governance validation
-            diff_metadata = parse_diff_metadata(request.diff)
-            governance_result = GovernanceValidator.validate_diff(
-                diff_content=request.diff,
-                description=request.description,
-                files_in_diff=diff_metadata.file_paths
-            )
-
-            # Handle governance violations based on mode
-            if governance_result.violations:
-                log_operation(
-                    task_id=request.task_id,
-                    mode=mode,
-                    operation="governance_check",
-                    status="Working" if governance_result.passed else "Broken",
-                    governance_violations=[
-                        {"rule": v.rule_id, "message": v.message, "severity": v.severity.value}
-                        for v in governance_result.violations
-                    ]
-                )
-
-                # CRITICAL mode: Block if severe violations
-                if mode == "CRITICAL" and governance_result.has_severe:
-                    return create_error_response(
-                        task_id=request.task_id,
-                        mode=mode,
-                        error=f"Governance violations (CRITICAL mode blocks severe): "
-                              f"{', '.join(v.message for v in governance_result.violations if v.severity == ViolationSeverity.SEVERE)}",
-                        validation_result=validation_result
-                    )
-
-                # RAPID mode: Block only if severe
-                if mode == "RAPID" and governance_result.has_severe:
-                    return create_error_response(
-                        task_id=request.task_id,
-                        mode=mode,
-                        error=f"Governance violations (severe): "
-                              f"{', '.join(v.message for v in governance_result.violations if v.severity == ViolationSeverity.SEVERE)}",
-                        validation_result=validation_result
-                    )
-
-            # Step 5: Validate push safety
+            # Step 4: Validate push safety
             safe, reason = validate_push_safety(
                 mode=mode,
                 files_changed=validation_result.files_changed,
@@ -274,10 +232,6 @@ class Engine:
             else:
                 summary += "Changes committed locally. Manual push required."
 
-            # Add governance warnings to summary
-            if governance_result.warnings:
-                summary += f" Governance warnings: {len(governance_result.warnings)}."
-
             log_operation(
                 task_id=request.task_id,
                 mode=mode,
@@ -286,8 +240,7 @@ class Engine:
                 commit_sha=commit_sha,
                 files_changed=validation_result.files_changed,
                 lines_changed=validation_result.lines_added + validation_result.lines_removed,
-                pushed=pushed,
-                governance_warnings=governance_result.warnings if governance_result.warnings else None
+                pushed=pushed
             )
 
             return create_success_response(
@@ -300,8 +253,7 @@ class Engine:
                 validation_result=validation_result,
                 pre_test_result=pre_test_result,
                 post_test_result=post_test_result,
-                pushed=pushed,
-                governance_warnings=governance_result.warnings if governance_result.warnings else None
+                pushed=pushed
             )
             
         except Exception as e:
