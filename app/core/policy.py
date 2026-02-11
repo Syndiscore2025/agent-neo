@@ -4,6 +4,12 @@ Decides if auto-push is allowed based on mode and flags.
 """
 
 from typing import Literal
+from app.core.config import (
+    RAPID_MAX_FILES,
+    RAPID_MAX_LINES,
+    CRITICAL_MAX_FILES,
+    CRITICAL_MAX_LINES,
+)
 
 
 def should_auto_push(
@@ -72,16 +78,16 @@ def validate_push_safety(
         Tuple of (is_safe, reason)
     """
     if mode == "RAPID":
-        if lines_changed > 2000:
-            return False, f"Too many lines changed for RAPID mode: {lines_changed} (max: 2000)"
-        if files_changed > 20:
-            return False, f"Too many files changed: {files_changed} (max: 20)"
-    
+        if lines_changed > RAPID_MAX_LINES:
+            return False, f"Too many lines changed for RAPID mode: {lines_changed} (max: {RAPID_MAX_LINES})"
+        if files_changed > RAPID_MAX_FILES:
+            return False, f"Too many files changed: {files_changed} (max: {RAPID_MAX_FILES})"
+
     if mode == "CRITICAL":
-        if lines_changed > 5000:
-            return False, f"Too many lines changed: {lines_changed} (max: 5000)"
-        if files_changed > 50:
-            return False, f"Too many files changed: {files_changed} (max: 50)"
-    
+        if lines_changed > CRITICAL_MAX_LINES:
+            return False, f"Too many lines changed: {lines_changed} (max: {CRITICAL_MAX_LINES})"
+        if files_changed > CRITICAL_MAX_FILES:
+            return False, f"Too many files changed: {files_changed} (max: {CRITICAL_MAX_FILES})"
+
     return True, "Push safety validated"
 

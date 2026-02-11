@@ -18,6 +18,22 @@ def disable_remote_check():
     os.environ.pop("SKIP_PUSH", None)
 
 
+def _engine_globals():
+    """Get the actual globals dict used by Engine.execute.
+
+    After test_api.py clears sys.modules and reimports app.core.engine,
+    the top-level ``from app.core.engine import Engine`` still references
+    the *original* module object.  ``from app.core import engine`` would
+    return the *new* module, so patching it has no effect on the Engine
+    class that tests already hold.
+
+    ``Engine.execute.__globals__`` always points to the real namespace
+    that Engine's methods resolve names against, regardless of what
+    sys.modules currently contains.
+    """
+    return Engine.execute.__globals__
+
+
 def test_engine_initialization(temp_repo):
     """Test engine initialization."""
     engine = Engine(temp_repo)
@@ -47,10 +63,50 @@ def test_engine_plan_critical_mode(temp_repo):
         description="Update authentication logic",
         diff=None
     )
-    
+
     plan = engine.plan(request)
     assert plan.mode == "CRITICAL"
     assert "authentication" in plan.critical_keywords_found
+
+
+def test_engine_plan_explicit_mode_override(temp_repo):
+    """Test plan generation with explicit mode override."""
+    engine = Engine(temp_repo)
+    # Description would trigger CRITICAL, but explicit mode overrides
+    request = TaskRequest(
+        task_id="test-mode-override",
+        description="Update authentication logic",  # would be CRITICAL
+        diff=None,
+        mode="RAPID"  # explicit override
+    )
+
+    plan = engine.plan(request)
+    assert plan.mode == "RAPID"  # explicit mode wins
+    assert plan.critical_keywords_found == []  # no keyword detection when mode is explicit
+
+
+def test_engine_execute_explicit_mode_override(temp_repo):
+    """Test execution with explicit mode override."""
+    engine = Engine(temp_repo)
+    diff = """--- a/test.py
++++ b/test.py
+@@ -1,4 +1,5 @@
+ # Test file
+
+ def hello():
++    pass  # simple change
+     return 'world'
+"""
+    # Description would trigger CRITICAL, but explicit mode overrides
+    request = TaskRequest(
+        task_id="test-exec-mode-override",
+        description="Update authentication logic",  # would be CRITICAL
+        diff=diff,
+        mode="RAPID"  # explicit override
+    )
+
+    response = engine.execute(request)
+    assert response.mode == "RAPID"  # explicit mode wins
 
 
 def test_engine_execute_no_diff(temp_repo):
@@ -177,10 +233,9 @@ def test_engine_plan_with_diff(temp_repo, sample_diff):
 
 
 def test_engine_execute_governance_severe_rapid(temp_repo):
-    """Test governance blocks severe violations in RAPID mode (EXEC-004: git push -f)."""
+    """Test governance/validation blocks severe violations in RAPID mode (EXEC-004: git push -f)."""
     engine = Engine(temp_repo)
-    # "git push -f" triggers EXEC-004 but NOT validation's forbidden patterns
-    # (validation catches --force\b and \bFORCE\b, not "git push -f")
+    # "git push -f" triggers EXEC-004 in governance and also in centralized forbidden patterns
     diff = """--- a/test.py
 +++ b/test.py
 @@ -1,4 +1,5 @@
@@ -198,13 +253,14 @@ def test_engine_execute_governance_severe_rapid(temp_repo):
 
     response = engine.execute(request)
     assert response.status == "Broken"
-    assert "Governance" in response.error or "EXEC-004" in response.error or "force push" in response.error.lower()
+    # May be caught by validation (Forbidden pattern) or governance (EXEC-004)
+    assert "Governance" in response.error or "EXEC-004" in response.error or "force push" in response.error.lower() or "Forbidden pattern" in response.error
 
 
 def test_engine_execute_governance_severe_critical(temp_repo):
-    """Test governance blocks severe violations in CRITICAL mode (EXEC-004: git push -f)."""
+    """Test governance/validation blocks severe violations in CRITICAL mode (EXEC-004: git push -f)."""
     engine = Engine(temp_repo)
-    # "git push -f" triggers EXEC-004 but NOT validation's forbidden patterns
+    # "git push -f" triggers EXEC-004 in governance and also in centralized forbidden patterns
     diff = """--- a/test.py
 +++ b/test.py
 @@ -1,4 +1,5 @@
@@ -222,15 +278,16 @@ def test_engine_execute_governance_severe_critical(temp_repo):
 
     response = engine.execute(request)
     assert response.status == "Broken"
-    assert "Governance" in response.error or "CRITICAL mode blocks severe" in response.error or "force push" in response.error.lower()
+    # May be caught by validation (Forbidden pattern) or governance (EXEC-004/CRITICAL mode)
+    assert "Governance" in response.error or "CRITICAL mode blocks severe" in response.error or "force push" in response.error.lower() or "Forbidden pattern" in response.error
 
 
 def test_engine_execute_patch_apply_failure(temp_repo, monkeypatch):
     """Test patch apply failure (line 227)."""
-    from app.core import engine as engine_mod
+    g = _engine_globals()
 
     # Mock apply_patch to fail
-    monkeypatch.setattr(engine_mod, "apply_patch", lambda *args: (False, "mock patch failure"))
+    monkeypatch.setitem(g, "apply_patch", lambda *args: (False, "mock patch failure"))
 
     eng = Engine(temp_repo)
     request = TaskRequest(
@@ -254,9 +311,8 @@ def test_engine_execute_patch_apply_failure(temp_repo, monkeypatch):
 
 def test_engine_execute_commit_failure(temp_repo, sample_diff, monkeypatch):
     """Test commit failure (line 237)."""
-    from app.core import engine as engine_mod
-
-    monkeypatch.setattr(engine_mod, "commit_changes", lambda *args, **kwargs: (None, "mock commit failure"))
+    g = _engine_globals()
+    monkeypatch.setitem(g, "commit_changes", lambda *args, **kwargs: (None, "mock commit failure"))
 
     eng = Engine(temp_repo)
     request = TaskRequest(
@@ -272,12 +328,12 @@ def test_engine_execute_commit_failure(temp_repo, sample_diff, monkeypatch):
 
 def test_engine_execute_exception(temp_repo, sample_diff, monkeypatch):
     """Test exception handling in execute (lines 311-319)."""
-    from app.core import engine as engine_mod
+    g = _engine_globals()
 
     def raise_error(*args, **kwargs):
         raise Exception("Unexpected test error")
 
-    monkeypatch.setattr(engine_mod, "apply_patch", raise_error)
+    monkeypatch.setitem(g, "apply_patch", raise_error)
 
     eng = Engine(temp_repo)
     request = TaskRequest(
@@ -293,9 +349,8 @@ def test_engine_execute_exception(temp_repo, sample_diff, monkeypatch):
 
 def test_engine_execute_push_safety_fails(temp_repo, sample_diff, monkeypatch):
     """Test push safety validation fails (line 201)."""
-    from app.core import engine as engine_mod
-
-    monkeypatch.setattr(engine_mod, "validate_push_safety", lambda *args, **kwargs: (False, "Push unsafe"))
+    g = _engine_globals()
+    monkeypatch.setitem(g, "validate_push_safety", lambda *args, **kwargs: (False, "Push unsafe"))
 
     eng = Engine(temp_repo)
     request = TaskRequest(
@@ -311,10 +366,9 @@ def test_engine_execute_push_safety_fails(temp_repo, sample_diff, monkeypatch):
 
 def test_engine_execute_pre_tests_fail(temp_repo, sample_diff, monkeypatch):
     """Test pre-tests failure (lines 211-217)."""
-    from app.core import engine as engine_mod
-
+    g = _engine_globals()
     failed_result = TestResult(passed=False, output="test failed", duration_seconds=1.0)
-    monkeypatch.setattr(engine_mod, "run_tests", lambda *args, **kwargs: failed_result)
+    monkeypatch.setitem(g, "run_tests", lambda *args, **kwargs: failed_result)
 
     eng = Engine(temp_repo)
     request = TaskRequest(
@@ -330,7 +384,7 @@ def test_engine_execute_pre_tests_fail(temp_repo, sample_diff, monkeypatch):
 
 def test_engine_execute_post_tests_fail(temp_repo, sample_diff, monkeypatch):
     """Test post-tests failure (lines 246-253)."""
-    from app.core import engine as engine_mod
+    g = _engine_globals()
 
     call_count = [0]
 
@@ -341,7 +395,7 @@ def test_engine_execute_post_tests_fail(temp_repo, sample_diff, monkeypatch):
             return TestResult(passed=True, output="ok", duration_seconds=1.0)
         return TestResult(passed=False, output="post test failed", duration_seconds=1.0)
 
-    monkeypatch.setattr(engine_mod, "run_tests", side_effect)
+    monkeypatch.setitem(g, "run_tests", side_effect)
 
     eng = Engine(temp_repo)
     request = TaskRequest(
@@ -357,11 +411,11 @@ def test_engine_execute_post_tests_fail(temp_repo, sample_diff, monkeypatch):
 
 def test_engine_execute_push_fails(temp_repo, sample_diff, monkeypatch):
     """Test push failure (lines 264-271)."""
-    from app.core import engine as engine_mod
+    g = _engine_globals()
 
     # Enable push and make it fail
     monkeypatch.setenv("SKIP_PUSH", "false")
-    monkeypatch.setattr(engine_mod, "push_to_main", lambda *args, **kwargs: (False, "push failed"))
+    monkeypatch.setitem(g, "push_to_main", lambda *args, **kwargs: (False, "push failed"))
 
     eng = Engine(temp_repo)
     request = TaskRequest(
@@ -378,11 +432,11 @@ def test_engine_execute_push_fails(temp_repo, sample_diff, monkeypatch):
 
 def test_engine_execute_pushed_success(temp_repo, sample_diff, monkeypatch):
     """Test successful push (line 278)."""
-    from app.core import engine as engine_mod
+    g = _engine_globals()
 
     # Enable push and make it succeed
     monkeypatch.setenv("SKIP_PUSH", "false")
-    monkeypatch.setattr(engine_mod, "push_to_main", lambda *args, **kwargs: (True, ""))
+    monkeypatch.setitem(g, "push_to_main", lambda *args, **kwargs: (True, ""))
 
     eng = Engine(temp_repo)
     request = TaskRequest(
@@ -431,4 +485,3 @@ def test_engine_execute_governance_warnings(temp_repo, sample_diff, monkeypatch)
     response = eng.execute(request)
     assert response.status == "Working", f"Expected Working, got {response.status}: {response.error}"
     assert "Governance warnings" in response.summary
-

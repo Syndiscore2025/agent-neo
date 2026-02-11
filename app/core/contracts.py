@@ -14,13 +14,17 @@ class TaskRequest(BaseModel):
     description: str = Field(..., description="Task description")
     diff: Optional[str] = Field(None, description="Unified diff to apply")
     force: bool = Field(False, description="Force push in CRITICAL mode")
-    
+    mode: Optional[Literal["RAPID", "CRITICAL"]] = Field(
+        None,
+        description="Explicit mode override. If provided, skips keyword detection."
+    )
+
     @validator('task_id')
     def validate_task_id(cls, v):
         if not v or not v.strip():
             raise ValueError("task_id cannot be empty")
         return v.strip()
-    
+
     @validator('description')
     def validate_description(cls, v):
         if not v or not v.strip():

@@ -54,6 +54,41 @@ class GovernanceProfile:
     enforce_additive_only: bool = False
 
 
+# Centralized forbidden patterns structure
+# Used by both governance and validation modules
+FORBIDDEN_PATTERNS = {
+    "EXEC": [
+        r'--force\b',
+        r'\bFORCE\b',
+        "git push -f",
+        "git push --force",
+    ],
+    "GIT": [
+        r'git.{0,10}reset',
+        r'git.{0,10}rebase',
+    ],
+    "DB": [
+        r'DROP\s+TABLE',
+        r'ALTER\s+TABLE',
+        r'CREATE\s+TABLE',
+        r'DROP\s+INDEX',
+        r'CREATE\s+INDEX',
+    ],
+    "API": [],
+    "DEPLOY": [],
+    "LOG": [],
+}
+
+# Files that cannot be modified in RAPID mode
+RAPID_FORBIDDEN_FILES = [
+    'Dockerfile',
+    'docker-compose.yml',
+    '.github/workflows/',
+    'kubernetes/',
+    'terraform/',
+]
+
+
 class GovernanceValidator:
     """Validates diffs against profile-gated governance rules."""
 
@@ -126,18 +161,20 @@ class GovernanceValidator:
     def _check_execution_rules(diff_content: str) -> List[GovernanceViolation]:
         """Check execution rules (WARNING level)."""
         violations = []
-        
-        # Rule 4: Never force push
-        if "--force" in diff_content or "git push -f" in diff_content or "git push --force" in diff_content:
-            violations.append(GovernanceViolation(
-                rule_id="EXEC-004",
-                message="Force push detected in diff - never force push",
-                severity=ViolationSeverity.SEVERE
-            ))
-        
+
+        # Rule 4: Never force push - uses centralized FORBIDDEN_PATTERNS["EXEC"]
+        for pattern in FORBIDDEN_PATTERNS["EXEC"]:
+            if pattern in diff_content:
+                violations.append(GovernanceViolation(
+                    rule_id="EXEC-004",
+                    message="Force push detected in diff - never force push",
+                    severity=ViolationSeverity.SEVERE
+                ))
+                break  # One violation is enough for force push
+
         # Rule 12: Do not create new test files unless asked
         # This is checked at description level, not diff level
-        
+
         return violations
     
     @staticmethod

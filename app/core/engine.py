@@ -66,15 +66,20 @@ class Engine:
     def plan(self, request: TaskRequest) -> PlanResponse:
         """
         Generate execution plan.
-        
+
         Args:
             request: Task request
-            
+
         Returns:
             PlanResponse object
         """
-        mode, critical_keywords = detect_mode(request.description)
-        
+        # Use explicit mode if provided, otherwise detect from description
+        if request.mode:
+            mode = request.mode
+            critical_keywords = []
+        else:
+            mode, critical_keywords = detect_mode(request.description)
+
         # Scan repository context
         repo_info = scan_repository(str(self.repo_path))
         
@@ -110,8 +115,11 @@ class Engine:
         Returns:
             ExecuteResponse object
         """
-        # Detect mode
-        mode, _ = detect_mode(request.description)
+        # Use explicit mode if provided, otherwise detect from description
+        if request.mode:
+            mode = request.mode
+        else:
+            mode, _ = detect_mode(request.description)
         
         log_operation(
             task_id=request.task_id,

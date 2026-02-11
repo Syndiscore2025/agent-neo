@@ -6,40 +6,28 @@ Validates diffs against kernel rules.
 import re
 from typing import List, Literal
 from app.core.contracts import ValidationResult, DiffMetadata
+from app.core.config import (
+    RAPID_MAX_FILES,
+    RAPID_MAX_LINES,
+    CRITICAL_MAX_FILES,
+    CRITICAL_MAX_LINES,
+    MAX_FILE_DELETION_PERCENT,
+)
+from app.modules.governance import (
+    FORBIDDEN_PATTERNS as GOVERNANCE_PATTERNS,
+    RAPID_FORBIDDEN_FILES,
+)
 
 
-# Validation limits
-MAX_FILES_CHANGED = 20
-MAX_LINES_CHANGED_RAPID = 2000
-MAX_LINES_CHANGED_CRITICAL = 5000
-MAX_FILE_DELETION_PERCENT = 40
+# Build combined patterns from centralized structure
+# All modes: EXEC + GIT patterns
+FORBIDDEN_PATTERNS_ALL = (
+    GOVERNANCE_PATTERNS["EXEC"] +
+    GOVERNANCE_PATTERNS["GIT"]
+)
 
-# Forbidden patterns in all modes
-# Using .* to catch patterns even when split across strings like ['git', 'reset']
-FORBIDDEN_PATTERNS = [
-    r'git.{0,10}reset',
-    r'git.{0,10}rebase',
-    r'DROP\s+TABLE',
-    r'--force\b',
-    r'\bFORCE\b',
-]
-
-# Forbidden patterns in RAPID mode only
-FORBIDDEN_IN_RAPID = [
-    r'ALTER\s+TABLE',
-    r'CREATE\s+TABLE',
-    r'DROP\s+INDEX',
-    r'CREATE\s+INDEX',
-]
-
-# Files that cannot be modified in RAPID mode
-RAPID_FORBIDDEN_FILES = [
-    'Dockerfile',
-    'docker-compose.yml',
-    '.github/workflows/',
-    'kubernetes/',
-    'terraform/',
-]
+# RAPID mode only: DB patterns (schema changes)
+FORBIDDEN_IN_RAPID = GOVERNANCE_PATTERNS["DB"]
 
 
 def parse_diff_metadata(diff: str) -> DiffMetadata:
@@ -127,21 +115,22 @@ def validate_diff(
             forbidden_patterns=forbidden_found
         )
     
-    # Check file count
-    if metadata.files_changed > MAX_FILES_CHANGED:
+    # Check file count based on mode
+    max_files = RAPID_MAX_FILES if mode == "RAPID" else CRITICAL_MAX_FILES
+    if metadata.files_changed > max_files:
         errors.append(
-            f"Too many files changed: {metadata.files_changed} (max: {MAX_FILES_CHANGED})"
+            f"Too many files changed: {metadata.files_changed} (max: {max_files})"
         )
-    
+
     # Check line count based on mode
-    max_lines = MAX_LINES_CHANGED_RAPID if mode == "RAPID" else MAX_LINES_CHANGED_CRITICAL
+    max_lines = RAPID_MAX_LINES if mode == "RAPID" else CRITICAL_MAX_LINES
     if metadata.total_lines_changed > max_lines:
         errors.append(
             f"Too many lines changed: {metadata.total_lines_changed} (max: {max_lines} for {mode} mode)"
         )
     
     # Check for forbidden patterns (all modes)
-    for pattern in FORBIDDEN_PATTERNS:
+    for pattern in FORBIDDEN_PATTERNS_ALL:
         if re.search(pattern, diff, re.IGNORECASE):
             forbidden_found.append(pattern)
             errors.append(f"Forbidden pattern found: {pattern}")
