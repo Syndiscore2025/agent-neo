@@ -5,7 +5,7 @@ Production-ready remote execution agent.
 
 import os
 import logging
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -17,6 +17,7 @@ from app.core.contracts import (
     PlanResponse,
     HealthResponse
 )
+from app.core.auth import verify_bearer_token
 from app.modules.git_guard import get_git_state, GitGuardError
 
 
@@ -133,10 +134,12 @@ async def health_check():
 
 
 @app.post("/plan", response_model=PlanResponse)
-async def plan_task(request: TaskRequest):
+async def plan_task(request: TaskRequest, token: str = Depends(verify_bearer_token)):
     """
     Generate execution plan for a task.
-    
+
+    Requires Bearer token authentication.
+
     Args:
         request: Task request
         
@@ -154,13 +157,15 @@ async def plan_task(request: TaskRequest):
 
 
 @app.post("/execute", response_model=ExecuteResponse)
-async def execute_task(request: TaskRequest):
+async def execute_task(request: TaskRequest, token: str = Depends(verify_bearer_token)):
     """
     Execute a task with diff application.
-    
+
+    Requires Bearer token authentication.
+
     Args:
         request: Task request with diff
-        
+
     Returns:
         ExecuteResponse with execution results
     """
