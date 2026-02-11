@@ -1,6 +1,6 @@
 """
 AGENT NEO - Governance Module
-User-defined behavioral rules only.
+Configurable behavioral rules gated by GovernanceProfile.
 """
 
 from typing import List, Optional
@@ -29,66 +29,76 @@ class GovernanceResult:
     passed: bool
     violations: List[GovernanceViolation]
     warnings: List[str]
-    
+
     @property
     def has_severe(self) -> bool:
         """Check if any severe violations exist."""
         return any(v.severity == ViolationSeverity.SEVERE for v in self.violations)
 
 
+@dataclass
+class GovernanceProfile:
+    """
+    Configurable profile that controls which governance rule groups are active.
+
+    No default assumptions about multi-tenancy, database type,
+    API stability, or schema behavior.
+    """
+    enforce_execution_rules: bool = True
+    enforce_git_discipline: bool = True
+    enforce_database_rules: bool = False
+    enforce_api_stability: bool = False
+    enforce_test_coverage: bool = False
+    enforce_logging_rules: bool = False
+    enforce_deployment_rules: bool = False
+    enforce_additive_only: bool = False
+
+
 class GovernanceValidator:
-    """Validates diffs against user-defined governance rules."""
-    
+    """Validates diffs against profile-gated governance rules."""
+
     @staticmethod
     def validate_diff(
         diff_content: str,
         description: str,
-        files_in_diff: List[str]
+        files_in_diff: List[str],
+        profile: Optional[GovernanceProfile] = None
     ) -> GovernanceResult:
         """
-        Validate diff against all governance rules.
-        
+        Validate diff against governance rules enabled by profile.
+
         Args:
             diff_content: The unified diff content
             description: Task description
             files_in_diff: List of file paths in diff
-            
+            profile: GovernanceProfile controlling which rules are active.
+                     If None, uses default profile (execution + git only).
+
         Returns:
             GovernanceResult with violations and warnings
         """
+        if profile is None:
+            profile = GovernanceProfile()
+
         violations = []
-        warnings = []
-        
-        # COMMUNICATION RULES - all INFO level (guidance only)
+
+        # COMMUNICATION RULES - always active (INFO level guidance only)
         violations.extend(GovernanceValidator._check_communication_rules(description))
-        
-        # EXECUTION RULES - WARNING level
-        violations.extend(GovernanceValidator._check_execution_rules(diff_content, files_in_diff))
-        
-        # DATABASE RULES - SEVERE level
-        violations.extend(GovernanceValidator._check_database_rules(diff_content))
-        
-        # ERROR HANDLING RULES - WARNING level
-        violations.extend(GovernanceValidator._check_error_handling_rules(diff_content))
-        
-        # API RULES - SEVERE level
-        violations.extend(GovernanceValidator._check_api_rules(diff_content, files_in_diff))
-        
-        # DEPLOYMENT RULES - WARNING level
-        violations.extend(GovernanceValidator._check_deployment_rules(diff_content, files_in_diff))
-        
-        # LOGGING RULES - WARNING level
-        violations.extend(GovernanceValidator._check_logging_rules(diff_content))
-        
-        # SIMPLICITY RULE - INFO level
-        violations.extend(GovernanceValidator._check_simplicity_rules(diff_content, description))
-        
+
+        # EXECUTION / GIT DISCIPLINE RULES
+        if profile.enforce_execution_rules or profile.enforce_git_discipline:
+            violations.extend(GovernanceValidator._check_execution_rules(diff_content))
+
+        # DATABASE RULES - only when profile enables them
+        if profile.enforce_database_rules:
+            violations.extend(GovernanceValidator._check_database_rules(diff_content))
+
         # Extract warnings from INFO violations
         warnings = [v.message for v in violations if v.severity == ViolationSeverity.INFO]
-        
+
         # Passed if no SEVERE violations
         passed = not any(v.severity == ViolationSeverity.SEVERE for v in violations)
-        
+
         return GovernanceResult(
             passed=passed,
             violations=violations,
@@ -113,7 +123,7 @@ class GovernanceValidator:
         return violations
     
     @staticmethod
-    def _check_execution_rules(diff_content: str, files_in_diff: List[str]) -> List[GovernanceViolation]:
+    def _check_execution_rules(diff_content: str) -> List[GovernanceViolation]:
         """Check execution rules (WARNING level)."""
         violations = []
         
@@ -155,47 +165,6 @@ class GovernanceValidator:
                 message="SQL string concatenation detected - use parameterized queries only",
                 severity=ViolationSeverity.SEVERE
             ))
-
-        return violations
-
-    @staticmethod
-    def _check_error_handling_rules(diff_content: str) -> List[GovernanceViolation]:
-        """Check error handling rules (WARNING level)."""
-        violations = []
-        # No automated checks - these are runtime/code review concerns
-        return violations
-
-    @staticmethod
-    def _check_api_rules(diff_content: str, files_in_diff: List[str]) -> List[GovernanceViolation]:
-        """Check API rules (SEVERE level for breaking changes)."""
-        violations = []
-        # No automated checks - breaking changes need semantic analysis
-        return violations
-
-    @staticmethod
-    def _check_deployment_rules(diff_content: str, files_in_diff: List[str]) -> List[GovernanceViolation]:
-        """Check deployment rules (WARNING level)."""
-        violations = []
-
-        # Rule 2: Run migrations before serving traffic
-        # This is a deployment-time check, not diff-time
-
-        return violations
-
-    @staticmethod
-    def _check_logging_rules(diff_content: str) -> List[GovernanceViolation]:
-        """Check logging rules (WARNING/SEVERE level)."""
-        violations = []
-        # No automated checks - sensitive data detection needs semantic analysis
-        return violations
-
-    @staticmethod
-    def _check_simplicity_rules(diff_content: str, description: str) -> List[GovernanceViolation]:
-        """Check simplicity rules (INFO level - guidance only)."""
-        violations = []
-
-        # Rule 2: Do not over-engineer
-        # This is subjective and guidance-only
 
         return violations
 

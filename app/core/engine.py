@@ -30,7 +30,14 @@ from app.modules.git_guard import (
 from app.modules.patch_git import apply_patch, commit_changes, push_to_main
 from app.modules.tests_runner import run_tests
 from app.modules.repo_context import scan_repository
-from app.modules.governance import GovernanceValidator, ViolationSeverity
+from app.modules.governance import GovernanceValidator, GovernanceProfile, ViolationSeverity
+
+# Default governance profile for Agent NEO:
+# Execution + git discipline always active, database/API/deploy/logging off by default
+DEFAULT_GOVERNANCE_PROFILE = GovernanceProfile(
+    enforce_execution_rules=True,
+    enforce_git_discipline=True,
+)
 
 
 class Engine:
@@ -153,7 +160,8 @@ class Engine:
             governance_result = GovernanceValidator.validate_diff(
                 diff_content=request.diff,
                 description=request.description,
-                files_in_diff=diff_metadata.file_paths
+                files_in_diff=diff_metadata.file_paths,
+                profile=DEFAULT_GOVERNANCE_PROFILE
             )
 
             # Capture warnings for success response
