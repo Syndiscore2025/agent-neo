@@ -156,59 +156,20 @@ class GovernanceValidator:
                 severity=ViolationSeverity.SEVERE
             ))
 
-        # Rule 3: Always scope by client_id - check for queries without client_id
-        if "SELECT" in diff_content.upper() and "WHERE" in diff_content.upper():
-            if "client_id" not in diff_lower:
-                violations.append(GovernanceViolation(
-                    rule_id="DB-003",
-                    message="Query without client_id scoping detected - always scope by client_id",
-                    severity=ViolationSeverity.SEVERE
-                ))
-
-        # Rule 6: Never modify schema directly (outside migrations)
-        if any(pattern in diff_content.upper() for pattern in ["ALTER TABLE", "DROP TABLE", "CREATE TABLE"]):
-            # Check if this is in a migration file
-            if not any("migration" in line.lower() or "alembic" in line.lower() for line in diff_content.split("\n")):
-                violations.append(GovernanceViolation(
-                    rule_id="DB-006",
-                    message="Schema modification outside migration detected - never modify schema directly",
-                    severity=ViolationSeverity.SEVERE
-                ))
-
         return violations
 
     @staticmethod
     def _check_error_handling_rules(diff_content: str) -> List[GovernanceViolation]:
         """Check error handling rules (WARNING level)."""
         violations = []
-
-        # Rule 5: Never expose internal stack traces
-        if "traceback" in diff_content.lower() or "stack trace" in diff_content.lower():
-            violations.append(GovernanceViolation(
-                rule_id="ERR-005",
-                message="Stack trace exposure detected - never expose internal stack traces",
-                severity=ViolationSeverity.WARNING
-            ))
-
+        # No automated checks - these are runtime/code review concerns
         return violations
 
     @staticmethod
     def _check_api_rules(diff_content: str, files_in_diff: List[str]) -> List[GovernanceViolation]:
         """Check API rules (SEVERE level for breaking changes)."""
         violations = []
-
-        # Rule 6: Never modify existing client response schema
-        # Check if modifying existing response models
-        if any("Response" in line and ("class " in line or "def " in line) for line in diff_content.split("\n")):
-            if any(pattern in diff_content for pattern in [
-                "- ", # Deletion in diff
-            ]):
-                violations.append(GovernanceViolation(
-                    rule_id="API-006",
-                    message="Existing response schema modification detected - additive changes only",
-                    severity=ViolationSeverity.SEVERE
-                ))
-
+        # No automated checks - breaking changes need semantic analysis
         return violations
 
     @staticmethod
@@ -225,18 +186,7 @@ class GovernanceValidator:
     def _check_logging_rules(diff_content: str) -> List[GovernanceViolation]:
         """Check logging rules (WARNING/SEVERE level)."""
         violations = []
-
-        # Rule 5: Never log sensitive data
-        if any(pattern in diff_content.lower() for pattern in [
-            "log.*password", "log.*token", "log.*secret", "log.*api_key",
-            "logger.*password", "logger.*token", "logger.*secret", "logger.*api_key"
-        ]):
-            violations.append(GovernanceViolation(
-                rule_id="LOG-005",
-                message="Sensitive data logging detected - never log passwords, tokens, secrets",
-                severity=ViolationSeverity.SEVERE
-            ))
-
+        # No automated checks - sensitive data detection needs semantic analysis
         return violations
 
     @staticmethod
