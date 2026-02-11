@@ -501,57 +501,7 @@ class StructuredComparisonRule:
 
 
 # =============================================================================
-# PHASE 9: COMPLIANCE-FIRST AUTOMATION
-# =============================================================================
-
-class ComplianceRule:
-    """
-    No evasion, stealth, or bypass mechanisms.
-    Prefer rate limiting, backoff, official APIs.
-    """
-    RULE_ID = "GOV-009"
-    RULE_NAME = "Compliance First"
-
-    # Bypass/evasion patterns to reject
-    BYPASS_PATTERNS = [
-        r'bypass',
-        r'evade',
-        r'stealth',
-        r'avoid detection',
-        r'spoof',
-        r'fake.+(user.?agent|ip|header)',
-        r'rotate.+proxy',
-        r'captcha.+(bypass|solve|break)',
-    ]
-
-    # Compliant patterns to prefer
-    COMPLIANT_PATTERNS = [
-        r'rate.?limit',
-        r'backoff',
-        r'retry',
-        r'official.?api',
-        r'api.?key',
-        r'oauth',
-        r'throttle',
-    ]
-
-    @classmethod
-    def validate_diff(cls, diff_content: str) -> Optional[GovernanceViolation]:
-        """Check for bypass/evasion patterns."""
-        for pattern in cls.BYPASS_PATTERNS:
-            if re.search(pattern, diff_content, re.IGNORECASE):
-                return GovernanceViolation(
-                    rule_id=cls.RULE_ID,
-                    rule_name=cls.RULE_NAME,
-                    severity=ViolationSeverity.SEVERE,
-                    message=f"Non-compliant pattern detected: {pattern}",
-                    suggestion="Use official APIs, rate limiting, and backoff strategies"
-                )
-        return None
-
-
-# =============================================================================
-# PHASE 10: DOCUMENT SYNC
+# PHASE 9: DOCUMENT SYNC
 # =============================================================================
 
 class DocumentSyncRule:
@@ -562,7 +512,7 @@ class DocumentSyncRule:
     - Service configuration
     - API endpoints
     """
-    RULE_ID = "GOV-010"
+    RULE_ID = "GOV-009"
     RULE_NAME = "Document Sync"
 
     # Doc file patterns
@@ -614,7 +564,7 @@ class DocumentSyncRule:
 
 
 # =============================================================================
-# PHASE 11: RESPONSE TONE GOVERNANCE
+# PHASE 10: RESPONSE TONE GOVERNANCE
 # =============================================================================
 
 class ResponseToneRule:
@@ -622,7 +572,7 @@ class ResponseToneRule:
     Enforce professional, direct tone.
     No fluff, no flattery, no defensive tone.
     """
-    RULE_ID = "GOV-011"
+    RULE_ID = "GOV-010"
     RULE_NAME = "Response Tone"
 
     # Fluff patterns to avoid
@@ -712,12 +662,7 @@ class GovernanceValidator:
         if simplicity_violation:
             violations.append(simplicity_violation)
 
-        # Phase 9: Compliance
-        compliance_violation = ComplianceRule.validate_diff(diff_content)
-        if compliance_violation:
-            violations.append(compliance_violation)
-
-        # Phase 10: Document Sync
+        # Phase 9: Document Sync
         if files_in_diff:
             doc_violation = DocumentSyncRule.check_doc_sync_needed(diff_content, files_in_diff)
             if doc_violation:
@@ -770,7 +715,7 @@ class GovernanceValidator:
         if comparison_violation:
             violations.append(comparison_violation)
 
-        # Phase 11: Response Tone
+        # Phase 10: Response Tone
         tone_violations = ResponseToneRule.validate_response(response)
         violations.extend(tone_violations)
 
