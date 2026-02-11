@@ -346,3 +346,26 @@ def test_get_directory_structure_permission_error(temp_repo):
         # Children list should be empty due to permission error
         assert "children" in structure
 
+
+def test_scan_repository_file_read_error(temp_repo):
+    """Test that scan_repository handles file read errors gracefully."""
+    from unittest.mock import patch, mock_open
+
+    # Create a file
+    (Path(temp_repo) / "test_file.txt").write_text("content\n")
+
+    # Mock open to raise an exception when reading
+    original_open = open
+    def selective_open(*args, **kwargs):
+        if 'test_file.txt' in str(args[0]):
+            raise OSError("Cannot read file")
+        return original_open(*args, **kwargs)
+
+    with patch('builtins.open', side_effect=selective_open):
+        # Should not crash, just skip counting lines for that file
+        info = scan_repository(temp_repo)
+
+        # Should still complete successfully
+        assert "total_files" in info
+        assert info["total_files"] >= 0
+

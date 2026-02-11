@@ -128,3 +128,92 @@ def test_validate_diff_high_deletion_percent():
     assert result.valid == False
     assert any("deletion" in err.lower() for err in result.errors)
 
+
+def test_validate_diff_too_many_files():
+    """Test validation with too many files changed."""
+    # Create a diff with 21 files (exceeds MAX_FILES_CHANGED = 20)
+    files = []
+    for i in range(21):
+        files.append(f"""--- a/file{i}.py
++++ b/file{i}.py
+@@ -1,1 +1,2 @@
+ line1
++line2
+""")
+
+    many_files_diff = "\n".join(files)
+    result = validate_diff(many_files_diff, "RAPID")
+
+    assert result.valid == False
+    assert any("too many files" in err.lower() for err in result.errors)
+
+
+def test_validate_diff_forbidden_pattern_git_reset():
+    """Test that git reset is forbidden in all modes."""
+    diff_with_reset = """--- a/script.sh
++++ b/script.sh
+@@ -1,1 +1,2 @@
+ #!/bin/bash
++git reset --hard HEAD~1
+"""
+    result = validate_diff(diff_with_reset, "RAPID")
+
+    assert result.valid == False
+    assert len(result.forbidden_patterns) > 0
+    assert any("forbidden pattern" in err.lower() for err in result.errors)
+
+
+def test_validate_diff_forbidden_pattern_alter_table_rapid():
+    """Test that ALTER TABLE is forbidden in RAPID mode only."""
+    diff_with_alter = """--- a/migration.sql
++++ b/migration.sql
+@@ -1,1 +1,2 @@
+ -- Migration
++ALTER TABLE users ADD COLUMN email VARCHAR(255);
+"""
+    result_rapid = validate_diff(diff_with_alter, "RAPID")
+    result_critical = validate_diff(diff_with_alter, "CRITICAL")
+
+    # Should fail in RAPID mode
+    assert result_rapid.valid == False
+    assert any("forbidden pattern" in err.lower() for err in result_rapid.errors)
+
+    # Should pass in CRITICAL mode (ALTER TABLE only forbidden in RAPID)
+    # Note: It might still fail for other reasons, but not for ALTER TABLE
+    assert not any("alter table" in err.lower() for err in result_critical.errors)
+
+
+def test_calculate_deletion_percent_no_changes():
+    """Test deletion percentage with no changes."""
+    diff = """--- a/test.py
++++ b/test.py
+@@ -1,1 +1,1 @@
+ line1
+"""
+    percent = _calculate_deletion_percent(diff, "test.py")
+
+    # No additions or deletions = 0%
+    assert percent == 0.0
+
+
+def test_calculate_deletion_percent_multi_file():
+    """Test deletion percentage calculation stops at next file."""
+    diff = """--- a/file1.py
++++ b/file1.py
+@@ -1,5 +1,2 @@
+-line1
+-line2
+-line3
++new1
+--- a/file2.py
++++ b/file2.py
+@@ -1,1 +1,2 @@
+ line1
++line2
+"""
+    # Should only count deletions in file1.py, not file2.py
+    percent = _calculate_deletion_percent(diff, "file1.py")
+
+    # 3 deletions, 1 addition = 75% deletion
+    assert percent == 75.0
+
