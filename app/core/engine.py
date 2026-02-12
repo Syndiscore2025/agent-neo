@@ -272,6 +272,26 @@ class Engine:
                     error="Post-apply tests failed. Changes committed but not pushed.",
                     test_result=post_test_result
                 )
+
+            # Step 8.5: Validate coverage (enterprise standard: 80%)
+            from app.modules.tests_runner import validate_coverage, get_coverage_enforcement_mode
+            enforce_coverage = get_coverage_enforcement_mode()
+
+            if enforce_coverage and post_test_result.coverage_percent is not None:
+                if not validate_coverage(post_test_result.coverage_percent, min_coverage=80.0, enforce_coverage=True):
+                    log_operation(
+                        task_id=request.task_id,
+                        mode=mode,
+                        operation="coverage_failed",
+                        status="Broken",
+                        commit_sha=commit_sha
+                    )
+                    return create_error_response(
+                        task_id=request.task_id,
+                        mode=mode,
+                        error=f"Coverage below 80% threshold: {post_test_result.coverage_percent:.1f}%. Changes committed but not pushed.",
+                        test_result=post_test_result
+                    )
             
             # Step 9: Push to main (if allowed)
             pushed = False

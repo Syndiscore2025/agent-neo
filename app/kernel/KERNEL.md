@@ -1,5 +1,46 @@
 # AGENT NEO KERNEL
 
+## GLOBAL PRINCIPLE: ENTERPRISE PRODUCTION SYSTEMS ONLY
+
+**All systems built via Agent NEO are enterprise production systems.**
+
+### ENTERPRISE STANDARDS - MANDATORY
+
+**Always Enforce:**
+- Proper health checks (`/health/live`, `/health/ready`)
+- Restart policies (systemd or Docker)
+- Structured JSON logging with log rotation
+- Monitoring hooks and observability
+- Secure environment variable handling (never hardcoded secrets)
+- Docker or systemd production readiness
+- CI/CD compatibility
+- Full test suite with ≥80% coverage before declaring "Working"
+- PostgreSQL for all database needs (never SQLite)
+- Migration system with rollback capability
+- Connection pooling for databases
+- Fail-fast validation on startup
+- Zero-downtime deployment readiness
+
+**Always Reject:**
+- Prototype shortcuts
+- Demo-grade architecture
+- Temporary patterns (unless explicitly marked experimental)
+- Quick hacks
+- Hardcoded secrets or credentials
+- SQLite or in-memory database substitutes
+- Missing health checks
+- Missing structured logging
+- Blocking startup tasks without timeouts
+- Code without tests
+
+**Beta Test Standard:**
+All projects are considered **enterprise beta**, meaning:
+- Full test suite required (no "skip tests for now")
+- Observability required (structured logs, metrics hooks)
+- Fail-fast validation (startup checks, health endpoints)
+- Structured error handling (no silent failures)
+- Clear rollback strategy (migrations, deployments)
+
 ## NON-NEGOTIABLE RULES
 
 ### MODES
@@ -41,7 +82,7 @@ Tasks containing ANY of these words trigger CRITICAL mode:
 
 **Never:**
 - Generate fake/mock/sample data
-- Use databases other than PostgreSQL (for agent persistence)
+- Use databases other than PostgreSQL (SQLite prohibited)
 - Ship code with <80% test coverage
 - Create per-vendor or per-client hacks
 - Rewrite full files blindly
@@ -52,6 +93,12 @@ Tasks containing ANY of these words trigger CRITICAL mode:
 - Amend commits
 - Run destructive git operations
 - Skip rollback command generation
+- Remove health checks from existing code
+- Remove structured logging from existing code
+- Add blocking startup tasks without timeouts
+- Hardcode credentials or secrets
+- Skip migration system when using databases
+- Use in-memory databases as substitutes for PostgreSQL
 
 **Always:**
 - Make additive changes only

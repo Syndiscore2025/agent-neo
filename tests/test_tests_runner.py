@@ -106,13 +106,14 @@ def test_detect_test_command_pytest(temp_repo):
     # Create pytest.ini
     pytest_ini = Path(temp_repo) / "pytest.ini"
     pytest_ini.write_text("[pytest]\n")
-    
+
     with patch('subprocess.run') as mock_run:
         mock_run.return_value = MagicMock(returncode=0)
-        
+
         cmd = _detect_test_command(temp_repo)
-        
-        assert cmd == "pytest --tb=short -v"
+
+        # Enterprise v2.0 includes coverage flags
+        assert cmd == "pytest --tb=short -v --cov --cov-report=term-missing"
 
 
 def test_detect_test_command_npm(temp_repo):
@@ -243,7 +244,10 @@ def test_validate_coverage_exact_threshold():
 
 def test_validate_coverage_none():
     """Test coverage validation when coverage is None."""
-    assert validate_coverage(None, min_coverage=80.0) is True
+    # Enterprise v2.0: None coverage fails when enforcement is enabled
+    assert validate_coverage(None, min_coverage=80.0) is False
+    # But passes when enforcement is disabled
+    assert validate_coverage(None, min_coverage=80.0, enforce_coverage=False) is True
 
 
 def test_validate_coverage_custom_threshold():

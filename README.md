@@ -1,15 +1,25 @@
 # AGENT NEO
 
-Production-grade remote execution agent for safe, automated code deployment.
+**Enterprise production-grade remote execution agent for safe, automated code deployment.**
+
+Version: 2.0.0
 
 ## Overview
 
-AGENT NEO is a remote execution agent that:
+AGENT NEO is an enterprise remote execution agent that:
 - Integrates with Augment as a Remote Agent
 - Auto-generates and applies diffs safely
 - Auto-commits and auto-pushes to main (RAPID mode)
 - Enforces strict kernel safety rules
 - Provides rollback commands for every change
+- **NEW:** Multi-repository calibration and governance analysis
+- **NEW:** PostgreSQL-first database enforcement
+- **NEW:** Enterprise test coverage requirements (≥80%)
+- **NEW:** Infrastructure standardization (health checks, logging)
+
+> **Enterprise Standard:** All systems built via Agent NEO are production systems. No prototypes, no shortcuts.
+
+See [ENTERPRISE_FEATURES.md](ENTERPRISE_FEATURES.md) for detailed documentation of v2.0 features.
 
 ## Modes
 
@@ -39,9 +49,14 @@ agent-neo/
 │   ├── modules/             # Functional modules
 │   │   ├── git_guard.py     # Git safety checks
 │   │   ├── patch_git.py     # Patch application
-│   │   ├── tests_runner.py  # Test execution
+│   │   ├── tests_runner.py  # Test execution (80% coverage)
 │   │   ├── repo_context.py  # Repository scanning
-│   │   └── diff_generator.py # Diff generation
+│   │   ├── diff_generator.py # Diff generation
+│   │   ├── repo_miner.py    # Repository pattern extraction
+│   │   ├── style_fingerprint.py # Multi-repo aggregation
+│   │   ├── reasoning.py     # Governance analysis
+│   │   ├── postgres_guard.py # PostgreSQL enforcement
+│   │   └── governance.py    # Governance validation
 │   └── kernel/              # Non-negotiable rules
 │       ├── KERNEL.md
 │       ├── STYLE.md

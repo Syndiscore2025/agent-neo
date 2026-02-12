@@ -107,7 +107,8 @@ def _detect_test_command(repo_path: str) -> Optional[str]:
                 capture_output=True,
                 timeout=5
             )
-            return "pytest --tb=short -v"
+            # Include coverage by default for enterprise standard
+            return "pytest --tb=short -v --cov --cov-report=term-missing"
         except:
             pass
     
@@ -158,20 +159,40 @@ def _extract_coverage(output: str) -> Optional[float]:
     return None
 
 
-def validate_coverage(coverage_percent: Optional[float], min_coverage: float = 80.0) -> bool:
+def validate_coverage(
+    coverage_percent: Optional[float],
+    min_coverage: float = 80.0,
+    enforce_coverage: bool = True
+) -> bool:
     """
     Validate coverage meets minimum threshold.
-    
+
     Args:
         coverage_percent: Coverage percentage
-        min_coverage: Minimum required coverage
-        
+        min_coverage: Minimum required coverage (default: 80% enterprise standard)
+        enforce_coverage: Whether to enforce coverage requirement
+
     Returns:
         True if coverage meets threshold
     """
-    if coverage_percent is None:
-        # If coverage not available, assume it passes
+    if not enforce_coverage:
         return True
-    
+
+    if coverage_percent is None:
+        # Enterprise standard: if coverage not available, fail
+        # This encourages proper test infrastructure
+        return False
+
     return coverage_percent >= min_coverage
+
+
+def get_coverage_enforcement_mode() -> bool:
+    """
+    Get coverage enforcement mode from environment.
+
+    Returns:
+        True if coverage should be enforced (default: True for enterprise)
+    """
+    import os
+    return os.getenv("ENFORCE_COVERAGE", "true").lower() == "true"
 

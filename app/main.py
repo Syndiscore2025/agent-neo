@@ -15,7 +15,10 @@ from app.core.contracts import (
     TaskRequest,
     ExecuteResponse,
     PlanResponse,
-    HealthResponse
+    HealthResponse,
+    CalibrationRequest,
+    CalibrationResponse,
+    CalibrationApplyRequest
 )
 from app.core.auth import verify_bearer_token
 from app.modules.git_guard import get_git_state, GitGuardError
@@ -101,22 +104,22 @@ async def global_exception_handler(request: Request, exc: Exception):
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
     """
-    Health check endpoint.
-    
+    Health check endpoint (legacy).
+
     Returns:
         HealthResponse with current git state
     """
     try:
         repo_path = os.getenv("REPO_PATH")
         git_state = get_git_state(repo_path)
-        
+
         status = "Working" if (
             git_state.branch == "main" and
             git_state.clean and
             not git_state.detached and
             git_state.remote_reachable
         ) else "Broken"
-        
+
         return HealthResponse(
             status=status,
             branch=git_state.branch,
@@ -131,6 +134,64 @@ async def health_check():
             clean=False,
             remote="unreachable"
         )
+
+
+@app.get("/health/live")
+async def liveness_probe():
+    """
+    Liveness probe - checks if application is running.
+
+    Enterprise standard endpoint for Kubernetes/Docker health checks.
+
+    Returns:
+        200 if alive, 503 if not
+    """
+    return {"status": "alive", "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/health/ready")
+async def readiness_probe():
+    """
+    Readiness probe - checks if application is ready to serve traffic.
+
+    Enterprise standard endpoint for Kubernetes/Docker health checks.
+    Validates git state and engine initialization.
+
+    Returns:
+        200 if ready, 503 if not ready
+    """
+    try:
+        # Check if engine is initialized
+        if engine is None:
+            raise HTTPException(status_code=503, detail="Engine not initialized")
+
+        # Check git state
+        repo_path = os.getenv("REPO_PATH")
+        git_state = get_git_state(repo_path)
+
+        ready = (
+            git_state.branch == "main" and
+            git_state.clean and
+            not git_state.detached
+        )
+
+        if not ready:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Not ready: branch={git_state.branch}, clean={git_state.clean}, detached={git_state.detached}"
+            )
+
+        return {
+            "status": "ready",
+            "branch": git_state.branch,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Readiness check failed: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @app.post("/plan", response_model=PlanResponse)
@@ -198,17 +259,161 @@ async def execute_task(request: TaskRequest, token: str = Depends(verify_bearer_
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/calibrate", response_model=CalibrationResponse)
+async def calibrate_repos(request: CalibrationRequest, token: str = Depends(verify_bearer_token)):
+    """
+    Calibrate Agent NEO from multiple repositories.
+
+    Analyzes patterns across repositories and generates governance recommendations.
+    Does NOT auto-apply changes.
+
+    Requires Bearer token authentication.
+
+    Args:
+        request: Calibration request with repo URLs
+
+    Returns:
+        CalibrationResponse with analysis and recommendations
+    """
+    try:
+        from pathlib import Path
+        import shutil
+        from app.modules.repo_miner import clone_repo_shallow, mine_repository
+        from app.modules.style_fingerprint import aggregate_fingerprints
+        from app.modules.reasoning import analyze_governance_deltas, format_calibration_report
+
+        logger.info(f"Starting calibration with {len(request.repo_urls)} repositories")
+
+        # Create calibration directory
+        calibration_dir = Path("/opt/agent-neo/calibration") if os.path.exists("/opt") else Path.cwd() / "calibration"
+        calibration_dir.mkdir(parents=True, exist_ok=True)
+
+        fingerprints = []
+
+        # Clone and mine each repository
+        for repo_url in request.repo_urls:
+            repo_name = repo_url.rstrip('/').split('/')[-1].replace('.git', '')
+            repo_path = calibration_dir / repo_name
+
+            # Clean up if exists
+            if repo_path.exists():
+                shutil.rmtree(repo_path)
+
+            # Clone shallow
+            if not clone_repo_shallow(repo_url, repo_path):
+                logger.warning(f"Failed to clone {repo_url}, skipping")
+                continue
+
+            # Mine repository
+            try:
+                fingerprint = mine_repository(repo_path, repo_name)
+                fingerprints.append(fingerprint)
+                logger.info(f"Mined {repo_name}: {fingerprint.total_files} files, {fingerprint.total_lines} lines")
+            except Exception as e:
+                logger.error(f"Failed to mine {repo_name}: {e}")
+                continue
+
+        if not fingerprints:
+            return CalibrationResponse(
+                status="Broken",
+                repo_count=0,
+                patterns_detected={},
+                style_consistency_score=0.0,
+                governance_deltas_suggested=[],
+                confidence_score=0.0,
+                report="No repositories successfully analyzed"
+            )
+
+        # Aggregate fingerprints
+        aggregated = aggregate_fingerprints(fingerprints)
+
+        # Analyze with reasoning
+        analysis = analyze_governance_deltas(aggregated)
+
+        # Format report
+        report = format_calibration_report(analysis)
+
+        logger.info(f"Calibration complete: {len(fingerprints)} repos, confidence {analysis['confidence_score']:.1f}")
+
+        return CalibrationResponse(
+            status="Working",
+            repo_count=analysis['repo_count'],
+            patterns_detected=analysis['patterns_detected'],
+            style_consistency_score=analysis['style_consistency_score'],
+            governance_deltas_suggested=analysis['governance_deltas_suggested'],
+            confidence_score=analysis['confidence_score'],
+            report=report
+        )
+
+    except Exception as e:
+        logger.error(f"Calibration failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/calibrate/apply", response_model=ExecuteResponse)
+async def apply_calibration(request: CalibrationApplyRequest, token: str = Depends(verify_bearer_token)):
+    """
+    Apply approved calibration deltas.
+
+    Requires explicit approval of deltas and unified diff.
+    Runs full validation and test pipeline.
+
+    Requires Bearer token authentication.
+
+    Args:
+        request: Calibration apply request with approved deltas and diff
+
+    Returns:
+        ExecuteResponse with execution results
+    """
+    try:
+        logger.info(f"Applying calibration with {len(request.approved_deltas)} approved deltas")
+
+        # Validate delta count (safety limit)
+        if len(request.approved_deltas) > 25:
+            raise HTTPException(
+                status_code=400,
+                detail="Maximum 25 deltas allowed per calibration apply"
+            )
+
+        # Create task request from calibration
+        task_request = TaskRequest(
+            task_id=f"calibration-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",
+            description=f"Apply calibration deltas: {', '.join(request.approved_deltas[:3])}...",
+            diff=request.diff,
+            force=False,
+            mode="CRITICAL"  # Calibration always uses CRITICAL mode
+        )
+
+        # Execute through normal pipeline
+        response = engine.execute(task_request)
+
+        logger.info(f"Calibration applied: status={response.status}")
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Calibration apply failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/")
 async def root():
     """Root endpoint."""
     return {
         "agent": "AGENT NEO",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "status": "Working",
         "endpoints": {
             "health": "/health",
+            "health_live": "/health/live",
+            "health_ready": "/health/ready",
             "plan": "/plan",
-            "execute": "/execute"
+            "execute": "/execute",
+            "calibrate": "/calibrate",
+            "calibrate_apply": "/calibrate/apply"
         }
     }
 

@@ -108,8 +108,46 @@ class DiffMetadata(BaseModel):
     total_lines_changed: int
     file_paths: List[str]
     is_valid_unified_diff: bool
-    
+
     @property
     def total_changes(self) -> int:
         return self.lines_added + self.lines_removed
+
+
+class CalibrationRequest(BaseModel):
+    """Request to calibrate from multiple repositories."""
+    repo_urls: List[str] = Field(..., description="List of Git repository URLs to analyze")
+    ignore_prototype: bool = Field(True, description="Ignore repositories flagged as prototypes")
+
+    @validator('repo_urls')
+    def validate_repo_urls(cls, v):
+        if not v or len(v) == 0:
+            raise ValueError("At least one repository URL required")
+        if len(v) > 10:
+            raise ValueError("Maximum 10 repositories allowed per calibration")
+        return v
+
+
+class CalibrationResponse(BaseModel):
+    """Response from calibration analysis."""
+    status: Literal["Working", "Broken"]
+    repo_count: int
+    patterns_detected: dict
+    style_consistency_score: float
+    governance_deltas_suggested: List[dict]
+    confidence_score: float
+    report: str
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+class CalibrationApplyRequest(BaseModel):
+    """Request to apply approved calibration deltas."""
+    approved_deltas: List[str] = Field(..., description="List of approved governance delta actions")
+    diff: str = Field(..., description="Unified diff implementing the deltas")
+
+    @validator('approved_deltas')
+    def validate_deltas(cls, v):
+        if not v or len(v) == 0:
+            raise ValueError("At least one approved delta required")
+        return v
 

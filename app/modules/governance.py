@@ -52,6 +52,7 @@ class GovernanceProfile:
     enforce_logging_rules: bool = False
     enforce_deployment_rules: bool = False
     enforce_additive_only: bool = False
+    enforce_postgresql_only: bool = True  # Enterprise standard: PostgreSQL only
 
 
 # Centralized forbidden patterns structure
@@ -73,6 +74,13 @@ FORBIDDEN_PATTERNS = {
         r'CREATE\s+TABLE',
         r'DROP\s+INDEX',
         r'CREATE\s+INDEX',
+    ],
+    "POSTGRES": [
+        r'sqlite',
+        r'sqlite3',
+        r':memory:',
+        r'\.db\b',
+        r'\.sqlite\b',
     ],
     "API": [],
     "DEPLOY": [],
@@ -127,6 +135,10 @@ class GovernanceValidator:
         # DATABASE RULES - only when profile enables them
         if profile.enforce_database_rules:
             violations.extend(GovernanceValidator._check_database_rules(diff_content))
+
+        # POSTGRESQL ENFORCEMENT - enterprise standard
+        if profile.enforce_postgresql_only:
+            violations.extend(GovernanceValidator._check_postgresql_rules(diff_content, files_in_diff))
 
         # Extract warnings from INFO violations
         warnings = [v.message for v in violations if v.severity == ViolationSeverity.INFO]
@@ -202,6 +214,61 @@ class GovernanceValidator:
                 message="SQL string concatenation detected - use parameterized queries only",
                 severity=ViolationSeverity.SEVERE
             ))
+
+        return violations
+
+    @staticmethod
+    def _check_postgresql_rules(diff_content: str, files_in_diff: List[str]) -> List[GovernanceViolation]:
+        """Check PostgreSQL-only enforcement rules (SEVERE level)."""
+        violations = []
+
+        diff_lower = diff_content.lower()
+
+        # Check for prohibited database types
+        for pattern in FORBIDDEN_PATTERNS["POSTGRES"]:
+            if pattern in diff_lower:
+                violations.append(GovernanceViolation(
+                    rule_id="PG-001",
+                    message=f"Prohibited database pattern detected: {pattern} - PostgreSQL only",
+                    severity=ViolationSeverity.SEVERE
+                ))
+                break
+
+        # Check for SQLite imports
+        if 'import sqlite3' in diff_content or 'from sqlite3' in diff_content:
+            violations.append(GovernanceViolation(
+                rule_id="PG-002",
+                message="SQLite import detected - use PostgreSQL only",
+                severity=ViolationSeverity.SEVERE
+            ))
+
+        # Check for in-memory database usage
+        if ':memory:' in diff_content or 'memory://' in diff_content:
+            violations.append(GovernanceViolation(
+                rule_id="PG-003",
+                message="In-memory database detected - use PostgreSQL only",
+                severity=ViolationSeverity.SEVERE
+            ))
+
+        # Warn if database connection without pooling
+        if 'postgresql://' in diff_lower or 'postgres://' in diff_lower:
+            if 'pool' not in diff_lower:
+                violations.append(GovernanceViolation(
+                    rule_id="PG-004",
+                    message="PostgreSQL connection without pooling - consider adding connection pooling",
+                    severity=ViolationSeverity.WARNING
+                ))
+
+        # Check for migration files without downgrade
+        for file_path in files_in_diff:
+            if 'alembic/versions/' in file_path or 'migrations/' in file_path:
+                if 'def downgrade' not in diff_content:
+                    violations.append(GovernanceViolation(
+                        rule_id="PG-005",
+                        message="Migration file missing downgrade() function",
+                        severity=ViolationSeverity.SEVERE
+                    ))
+                    break
 
         return violations
 
