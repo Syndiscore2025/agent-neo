@@ -98,10 +98,10 @@ def test_root_endpoint_includes_calibration_endpoints(client):
 
 
 def test_version_updated(client):
-    """Test version is updated to 2.0.0."""
+    """Test version is updated to 2.1.0."""
     response = client.get("/")
     assert response.status_code == 200
-    
+
     data = response.json()
-    assert data["version"] == "2.0.0"
+    assert data["version"] == "2.1.0"
 

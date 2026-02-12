@@ -259,6 +259,70 @@ async def execute_task(request: TaskRequest, token: str = Depends(verify_bearer_
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/calibrate/status")
+async def calibrate_status(token: str = Depends(verify_bearer_token)):
+    """
+    Get current calibration status and cache info.
+
+    Returns status of GitHub discovery configuration and clone cache.
+    """
+    try:
+        from app.modules.github_discovery import get_github_config, validate_github_config
+        from app.modules.repo_cloner import get_cache_status
+
+        config = get_github_config()
+        validation_errors = validate_github_config(config)
+        cache_status = get_cache_status(config.get("cache_dir"))
+
+        return {
+            "status": "ready" if not validation_errors else "not_configured",
+            "github_configured": not bool(validation_errors),
+            "github_owner": config.get("owner"),
+            "github_type": config.get("type"),
+            "max_repos": config.get("max_repos"),
+            "include_topics": list(config.get("include_topics", [])),
+            "exclude_topics": list(config.get("exclude_topics", [])),
+            "cache_status": cache_status,
+            "validation_errors": validation_errors
+        }
+    except Exception as e:
+        logger.error(f"Calibration status check failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/calibrate/discover")
+async def calibrate_discover(token: str = Depends(verify_bearer_token)):
+    """
+    Discover repositories from configured GitHub account.
+
+    Lists filtered repositories ready for calibration.
+    Does NOT clone or analyze - only lists.
+    """
+    try:
+        from app.modules.github_discovery import discover_repositories
+
+        result = discover_repositories()
+
+        if result.errors:
+            if not result.repos:
+                raise HTTPException(status_code=400, detail=result.errors[0])
+
+        return {
+            "status": "Working" if result.repos else "Broken",
+            "total_found": result.total_found,
+            "total_after_filter": result.total_filtered,
+            "repos_to_analyze": len(result.repos),
+            "filters_applied": result.filters_applied,
+            "repos": [r.to_dict() for r in result.repos],
+            "errors": result.errors
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Repository discovery failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/calibrate", response_model=CalibrationResponse)
 async def calibrate_repos(request: CalibrationRequest, token: str = Depends(verify_bearer_token)):
     """
@@ -404,7 +468,7 @@ async def root():
     """Root endpoint."""
     return {
         "agent": "AGENT NEO",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "status": "Working",
         "endpoints": {
             "health": "/health",
@@ -412,6 +476,8 @@ async def root():
             "health_ready": "/health/ready",
             "plan": "/plan",
             "execute": "/execute",
+            "calibrate_status": "/calibrate/status",
+            "calibrate_discover": "/calibrate/discover",
             "calibrate": "/calibrate",
             "calibrate_apply": "/calibrate/apply"
         }
