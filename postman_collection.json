@@ -1,0 +1,258 @@
+{
+  "info": {
+    "name": "Agent NEO API",
+    "description": "Complete API collection for Agent NEO - AI-powered code execution engine",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "version": "2.1.0"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{BEARER_TOKEN}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "BASE_URL",
+      "value": "https://agent-neo-app-yrmdg.ondigitalocean.app",
+      "type": "string"
+    },
+    {
+      "key": "BEARER_TOKEN",
+      "value": "neo_tk_8Kx2mP9vQwL4nR7jF3hY6bC1dE5gA0sT",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health Checks",
+      "item": [
+        {
+          "name": "Root",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/",
+              "host": ["{{BASE_URL}}"],
+              "path": [""]
+            }
+          }
+        },
+        {
+          "name": "Health Check (Legacy)",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/health",
+              "host": ["{{BASE_URL}}"],
+              "path": ["health"]
+            }
+          }
+        },
+        {
+          "name": "Liveness Probe",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/health/live",
+              "host": ["{{BASE_URL}}"],
+              "path": ["health", "live"]
+            }
+          }
+        },
+        {
+          "name": "Readiness Probe",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/health/ready",
+              "host": ["{{BASE_URL}}"],
+              "path": ["health", "ready"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Task Execution",
+      "item": [
+        {
+          "name": "Plan Task (RAPID Mode)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"task_id\": \"task-001\",\n  \"description\": \"Add a new utility function to calculate fibonacci numbers\",\n  \"mode\": \"RAPID\"\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/plan",
+              "host": ["{{BASE_URL}}"],
+              "path": ["plan"]
+            }
+          }
+        },
+        {
+          "name": "Plan Task (CRITICAL Mode)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"task_id\": \"task-002\",\n  \"description\": \"CRITICAL: Update authentication middleware to fix security vulnerability\",\n  \"mode\": \"CRITICAL\"\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/plan",
+              "host": ["{{BASE_URL}}"],
+              "path": ["plan"]
+            }
+          }
+        },
+        {
+          "name": "Execute Task (RAPID Mode)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"task_id\": \"task-003\",\n  \"description\": \"Add logging to the main application startup\",\n  \"mode\": \"RAPID\",\n  \"diff\": \"--- a/app/main.py\\n+++ b/app/main.py\\n@@ -1,3 +1,4 @@\\n+import logging\\n import os\\n from fastapi import FastAPI\\n\"\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/execute",
+              "host": ["{{BASE_URL}}"],
+              "path": ["execute"]
+            }
+          }
+        },
+        {
+          "name": "Execute Task with Diff (CRITICAL Mode)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"task_id\": \"task-004\",\n  \"description\": \"CRITICAL: Apply security patch\",\n  \"mode\": \"CRITICAL\",\n  \"diff\": \"--- a/app/main.py\\n+++ b/app/main.py\\n@@ -1,3 +1,4 @@\\n+# Security patch applied\\n import os\\n from fastapi import FastAPI\\n\",\n  \"force\": false\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/execute",
+              "host": ["{{BASE_URL}}"],
+              "path": ["execute"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Calibration",
+      "item": [
+        {
+          "name": "Get Calibration Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/calibrate/status",
+              "host": ["{{BASE_URL}}"],
+              "path": ["calibrate", "status"]
+            }
+          }
+        },
+        {
+          "name": "Discover Repositories",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{BASE_URL}}/calibrate/discover",
+              "host": ["{{BASE_URL}}"],
+              "path": ["calibrate", "discover"]
+            }
+          }
+        },
+        {
+          "name": "Calibrate from Repositories",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"repo_urls\": [\n    \"https://github.com/example/repo1.git\",\n    \"https://github.com/example/repo2.git\"\n  ],\n  \"ignore_prototype\": true\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/calibrate",
+              "host": ["{{BASE_URL}}"],
+              "path": ["calibrate"]
+            }
+          }
+        },
+        {
+          "name": "Apply Calibration Deltas",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"approved_deltas\": [\n    \"Add consistent error handling pattern\",\n    \"Enforce type hints in all functions\"\n  ],\n  \"diff\": \"--- a/governance.yaml\\n+++ b/governance.yaml\\n@@ -1,3 +1,5 @@\\n+error_handling: consistent\\n+type_hints: required\\n patterns:\\n   - name: error_handling\\n\"\n}"
+            },
+            "url": {
+              "raw": "{{BASE_URL}}/calibrate/apply",
+              "host": ["{{BASE_URL}}"],
+              "path": ["calibrate", "apply"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
+

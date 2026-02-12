@@ -368,8 +368,9 @@ async def calibrate_repos(request: CalibrationRequest, token: str = Depends(veri
 
         logger.info(f"Starting calibration with {len(request.repo_urls)} repositories")
 
-        # Create calibration directory
-        calibration_dir = Path("/opt/agent-neo/calibration") if os.path.exists("/opt") else Path.cwd() / "calibration"
+        # Create calibration directory (use env var or fallback to /tmp)
+        cache_dir_str = os.getenv("CALIBRATION_CACHE_DIR", "/tmp/agent-neo-calibration")
+        calibration_dir = Path(cache_dir_str)
         calibration_dir.mkdir(parents=True, exist_ok=True)
 
         fingerprints = []
