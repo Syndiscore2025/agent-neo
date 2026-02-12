@@ -43,15 +43,15 @@ async def lifespan(app: FastAPI):
     
     # Startup
     logger.info("AGENT NEO starting up...")
-    
+
     # Load configuration
-    repo_path = os.getenv("REPO_PATH")
-    if not repo_path:
-        logger.error("REPO_PATH environment variable not set")
-        raise RuntimeError("REPO_PATH environment variable required")
-    
+    # Default to /workspace for cloud deployments (DigitalOcean, Render, etc.)
+    # or current directory for local development
+    default_repo_path = os.getenv("HOME", "/workspace") if os.path.exists("/workspace") else os.getcwd()
+    repo_path = os.getenv("REPO_PATH", default_repo_path)
+
     logger.info(f"Repository path: {repo_path}")
-    
+
     # Initialize engine
     try:
         engine = Engine(repo_path)
@@ -59,16 +59,20 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to initialize engine: {e}")
         raise
-    
-    # Validate git state
+
+    # Validate git state (skip remote validation in cloud environments)
     try:
         from app.modules.git_guard import validate_git_state
-        require_remote = os.getenv("REQUIRE_REMOTE", "true").lower() == "true"
+        # Don't require remote in cloud deployments
+        is_cloud = os.path.exists("/workspace") or os.getenv("DYNO") or os.getenv("RENDER")
+        require_remote = os.getenv("REQUIRE_REMOTE", "false" if is_cloud else "true").lower() == "true"
         validate_git_state(repo_path, require_remote=require_remote)
         logger.info("Git state validated successfully")
     except GitGuardError as e:
-        logger.error(f"Git state validation failed: {e}")
-        raise
+        logger.warning(f"Git state validation failed: {e}")
+        # Don't fail startup in cloud environments
+        if not is_cloud:
+            raise
     
     logger.info("AGENT NEO ready")
     
