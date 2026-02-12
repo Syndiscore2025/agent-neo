@@ -117,12 +117,20 @@ async def health_check():
         repo_path = os.getenv("REPO_PATH")
         git_state = get_git_state(repo_path)
 
-        status = "Working" if (
-            git_state.branch == "main" and
-            git_state.clean and
-            not git_state.detached and
-            git_state.remote_reachable
-        ) else "Broken"
+        # In cloud deployments, relax git state requirements
+        is_cloud = os.path.exists("/workspace") or os.getenv("DYNO") or os.getenv("RENDER")
+
+        if is_cloud:
+            # For cloud: just check if engine is initialized
+            status = "Working" if engine is not None else "Broken"
+        else:
+            # For local: strict git state validation
+            status = "Working" if (
+                git_state.branch == "main" and
+                git_state.clean and
+                not git_state.detached and
+                git_state.remote_reachable
+            ) else "Broken"
 
         return HealthResponse(
             status=status,
@@ -173,11 +181,19 @@ async def readiness_probe():
         repo_path = os.getenv("REPO_PATH")
         git_state = get_git_state(repo_path)
 
-        ready = (
-            git_state.branch == "main" and
-            git_state.clean and
-            not git_state.detached
-        )
+        # In cloud deployments (detached HEAD), just check if engine is initialized
+        is_cloud = os.path.exists("/workspace") or os.getenv("DYNO") or os.getenv("RENDER")
+
+        if is_cloud:
+            # For cloud: just check engine is initialized (already checked above)
+            ready = True
+        else:
+            # For local: strict git state validation
+            ready = (
+                git_state.branch == "main" and
+                git_state.clean and
+                not git_state.detached
+            )
 
         if not ready:
             raise HTTPException(
