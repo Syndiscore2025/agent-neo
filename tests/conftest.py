@@ -11,6 +11,14 @@ import stat
 import time
 from pathlib import Path
 
+# Load .env so API keys (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.) are
+# available during the test run without requiring manual export.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=False)   # don't override already-set env vars
+except ImportError:
+    pass  # python-dotenv not installed — env must be set externally
+
 
 def _remove_readonly(func, path, excinfo):
     """Error handler for shutil.rmtree on Windows."""

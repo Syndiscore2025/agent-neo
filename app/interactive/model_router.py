@@ -172,16 +172,23 @@ class ModelRouter:
         # Use o1 (reasoning model) or fallback to gpt-4o
         model_name = os.getenv("OPENAI_MODEL", "o1")
 
-        try:
-            response = self._openai_client.chat.completions.create(
-                model=model_name,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
+        # o1/o3 reasoning models use max_completion_tokens and don't support
+        # the temperature parameter — use separate kwargs accordingly.
+        is_reasoning_model = model_name.startswith(("o1", "o3"))
 
+        create_kwargs: dict = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if is_reasoning_model:
+            create_kwargs["max_completion_tokens"] = max_tokens
+            # temperature is not supported on reasoning models; omit it
+        else:
+            create_kwargs["max_tokens"] = max_tokens
+            create_kwargs["temperature"] = temperature
+
+        try:
+            response = self._openai_client.chat.completions.create(**create_kwargs)
             return response.choices[0].message.content
         except Exception as e:
             logger.error(f"OpenAI API error: {e}")
