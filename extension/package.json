@@ -1,0 +1,116 @@
+{
+  "name": "agent-neo-vscode",
+  "displayName": "Agent NEO",
+  "description": "Interactive coding partner powered by Agent NEO",
+  "version": "2.1.0",
+  "publisher": "agent-neo",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Machine Learning",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "agent-neo.openChat",
+        "title": "Agent NEO: Open Chat"
+      },
+      {
+        "command": "agent-neo.explainSelection",
+        "title": "Agent NEO: Explain Selection"
+      },
+      {
+        "command": "agent-neo.refactorSelection",
+        "title": "Agent NEO: Refactor Selection"
+      },
+      {
+        "command": "agent-neo.generateTests",
+        "title": "Agent NEO: Generate Tests"
+      },
+      {
+        "command": "agent-neo.fixSelection",
+        "title": "Agent NEO: Fix Selection"
+      },
+      {
+        "command": "agent-neo.askAboutFile",
+        "title": "Agent NEO: Ask About Current File"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "agent-neo.explainSelection",
+          "when": "editorHasSelection",
+          "group": "agent-neo@1"
+        },
+        {
+          "command": "agent-neo.refactorSelection",
+          "when": "editorHasSelection",
+          "group": "agent-neo@2"
+        },
+        {
+          "command": "agent-neo.generateTests",
+          "when": "editorHasSelection",
+          "group": "agent-neo@3"
+        },
+        {
+          "command": "agent-neo.fixSelection",
+          "when": "editorHasSelection",
+          "group": "agent-neo@4"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Agent NEO",
+      "properties": {
+        "agentNeo.apiUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8000",
+          "description": "Agent NEO API URL"
+        },
+        "agentNeo.apiToken": {
+          "type": "string",
+          "default": "",
+          "description": "Agent NEO API Bearer Token"
+        },
+        "agentNeo.enableInlineCompletion": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable inline code completion"
+        },
+        "agentNeo.enableSuggestions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable prompt suggestions"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "@vscode/webview-ui-toolkit": "^1.4.0",
+    "axios": "^1.6.0",
+    "marked": "^11.0.0"
+  }
+}
+

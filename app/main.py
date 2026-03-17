@@ -23,6 +23,26 @@ from app.core.contracts import (
 from app.core.auth import verify_bearer_token
 from app.modules.git_guard import get_git_state, GitGuardError
 
+# Interactive layer imports
+from app.interactive.contracts import (
+    ChatRequest,
+    ChatResponse,
+    ChatHistoryResponse,
+    ApprovalRequest,
+    ApprovalResponse,
+    CompletionRequest,
+    CompletionResponse,
+    AttachmentUpload,
+    AttachmentResponse,
+    SuggestionRequest,
+    SuggestionResponse
+)
+from app.interactive.orchestrator import get_orchestrator
+from app.interactive.session_manager import get_session_manager
+from app.interactive.completion_service import get_completion_service
+from app.interactive.attachment_handler import get_attachment_handler
+from app.interactive.suggestion_engine import get_suggestion_engine
+
 
 # Configure logging
 logging.basicConfig(
@@ -85,8 +105,8 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app
 app = FastAPI(
     title="AGENT NEO",
-    description="Production-grade remote execution agent",
-    version="1.0.0",
+    description="Production-grade remote execution agent with interactive coding partner",
+    version="2.1.0",
     lifespan=lifespan
 )
 
@@ -484,6 +504,184 @@ async def apply_calibration(request: CalibrationApplyRequest, token: str = Depen
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================================
+# INTERACTIVE ENDPOINTS
+# ============================================================================
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(
+    request: ChatRequest,
+    _: str = Depends(verify_bearer_token)
+):
+    """
+    Send a chat message and get response.
+
+    TODO: Implement in SLICE 2
+    """
+    try:
+        orchestrator = get_orchestrator(engine)
+        response = await orchestrator.handle_chat(request)
+        return response
+    except Exception as e:
+        logger.error(f"Chat failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/chat/history", response_model=ChatHistoryResponse)
+async def get_chat_history(
+    session_id: str,
+    _: str = Depends(verify_bearer_token)
+):
+    """
+    Get chat history for a session.
+
+    TODO: Implement in SLICE 2
+    """
+    try:
+        session_manager = get_session_manager()
+        session = session_manager.get_session(session_id)
+
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        return ChatHistoryResponse(
+            session_id=session_id,
+            messages=session.messages,
+            total_messages=len(session.messages)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get chat history failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/chat/approve", response_model=ApprovalResponse)
+async def approve_diff(
+    request: ApprovalRequest,
+    _: str = Depends(verify_bearer_token)
+):
+    """
+    Approve or reject a proposed diff.
+
+    TODO: Implement in SLICE 5
+    """
+    try:
+        orchestrator = get_orchestrator(engine)
+        response = await orchestrator.handle_approval(request)
+        return response
+    except Exception as e:
+        logger.error(f"Approval failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/chat/session")
+async def delete_chat_session(
+    session_id: str,
+    _: str = Depends(verify_bearer_token)
+):
+    """
+    Delete a chat session.
+
+    TODO: Implement in SLICE 2
+    """
+    try:
+        session_manager = get_session_manager()
+        deleted = session_manager.delete_session(session_id)
+
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        return {"message": "Session deleted", "session_id": session_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Delete session failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/complete", response_model=CompletionResponse)
+async def complete(
+    request: CompletionRequest,
+    _: str = Depends(verify_bearer_token)
+):
+    """
+    Generate inline code completion.
+
+    TODO: Implement in SLICE 7
+    """
+    try:
+        completion_service = get_completion_service()
+        response = await completion_service.generate_completion(request)
+        return response
+    except Exception as e:
+        logger.error(f"Completion failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/attachments/upload", response_model=AttachmentResponse)
+async def upload_attachment(
+    upload: AttachmentUpload,
+    _: str = Depends(verify_bearer_token)
+):
+    """
+    Upload an image or PDF attachment.
+
+    TODO: Implement in SLICE 6
+    """
+    try:
+        attachment_handler = get_attachment_handler()
+        response = await attachment_handler.process_attachment(upload)
+        return response
+    except Exception as e:
+        logger.error(f"Attachment upload failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/attachments/{attachment_id}", response_model=AttachmentResponse)
+async def get_attachment(
+    attachment_id: str,
+    _: str = Depends(verify_bearer_token)
+):
+    """
+    Get attachment by ID.
+
+    TODO: Implement in SLICE 6
+    """
+    try:
+        attachment_handler = get_attachment_handler()
+        attachment = attachment_handler.get_attachment(attachment_id)
+
+        if not attachment:
+            raise HTTPException(status_code=404, detail="Attachment not found")
+
+        return attachment
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get attachment failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/suggestions", response_model=SuggestionResponse)
+async def get_suggestions(
+    request: SuggestionRequest,
+    _: str = Depends(verify_bearer_token)
+):
+    """
+    Get prompt suggestions based on context.
+
+    TODO: Implement in SLICE 8
+    """
+    try:
+        suggestion_engine = get_suggestion_engine()
+        response = await suggestion_engine.generate_suggestions(request)
+        return response
+    except Exception as e:
+        logger.error(f"Get suggestions failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/")
 async def root():
     """Root endpoint."""
@@ -500,7 +698,15 @@ async def root():
             "calibrate_status": "/calibrate/status",
             "calibrate_discover": "/calibrate/discover",
             "calibrate": "/calibrate",
-            "calibrate_apply": "/calibrate/apply"
+            "calibrate_apply": "/calibrate/apply",
+            "chat": "/chat",
+            "chat_history": "/chat/history",
+            "chat_approve": "/chat/approve",
+            "chat_reject": "/chat/reject",
+            "chat_session": "/chat/session",
+            "complete": "/complete",
+            "attachments_upload": "/attachments/upload",
+            "suggestions": "/suggestions"
         }
     }
 
