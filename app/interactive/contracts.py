@@ -81,6 +81,7 @@ class ApprovalRequest(BaseModel):
     """Request to approve or reject a proposed diff."""
     session_id: str
     approved: bool
+    push: bool = False  # If True, push to remote after applying
 
 
 class ApprovalResponse(BaseModel):

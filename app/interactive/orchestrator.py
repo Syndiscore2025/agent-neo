@@ -291,13 +291,18 @@ class InteractiveOrchestrator:
         logger.info(f"Executing approved diff for session {request.session_id}")
 
         try:
-            # Create TaskRequest for Agent NEO engine
+            # Create TaskRequest for Agent NEO engine.
+            # Always use CRITICAL mode for interactive changes:
+            #   - Commits locally so there is always an audit trail.
+            #   - Auto-push is controlled by request.push (force flag).
+            #     "Apply Changes" → push=False → commits only.
+            #     "Commit & Push" → push=True  → commits AND pushes.
             task_request = TaskRequest(
                 task_id=f"chat-{request.session_id}-{int(datetime.utcnow().timestamp())}",
                 description="User-approved changes from interactive chat",
                 diff=proposed_diff,
-                mode="RAPID",  # Use RAPID mode for interactive changes
-                force=False
+                mode="CRITICAL",
+                force=request.push
             )
 
             # Execute via existing Agent NEO pipeline

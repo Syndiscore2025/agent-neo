@@ -80,7 +80,7 @@ export class ChatPanel {
                 await this.handleClearSession();
                 break;
             case 'approveDiff':
-                await this.handleApproveDiff(message.proposal);
+                await this.handleApproveDiff(message.proposal, message.push || false);
                 break;
             case 'rejectDiff':
                 await this.handleRejectDiff(message.proposal);
@@ -204,10 +204,12 @@ export class ChatPanel {
 
     /**
      * Handle approving a diff proposal.
+     * @param push  When true the backend also pushes to remote ("Commit & Push").
      */
-    private async handleApproveDiff(proposal: any) {
+    private async handleApproveDiff(proposal: any, push: boolean = false) {
         try {
-            vscode.window.showInformationMessage('Applying changes...');
+            const label = push ? 'Committing & pushing changes...' : 'Applying changes...';
+            vscode.window.showInformationMessage(label);
 
             // Show loading state
             this.panel?.webview.postMessage({
@@ -216,7 +218,7 @@ export class ChatPanel {
             });
 
             // Call Agent NEO /chat/approve endpoint
-            const response = await this.apiClient.approveDiff(this.sessionId!, true);
+            const response = await this.apiClient.approveDiff(this.sessionId!, true, push);
 
             // Show success message
             vscode.window.showInformationMessage('Changes applied successfully!');
@@ -449,6 +451,15 @@ export class ChatPanel {
                         background-color: var(--vscode-button-secondaryHoverBackground);
                     }
 
+                    .diff-btn.push {
+                        background-color: #0e7a0d;
+                        color: #ffffff;
+                    }
+
+                    .diff-btn.push:hover {
+                        background-color: #1a9e19;
+                    }
+
                     #inputArea {
                         padding: 12px 16px;
                         background-color: var(--vscode-sideBar-background);
@@ -623,8 +634,15 @@ export class ChatPanel {
 
                         const approveBtn = document.createElement('button');
                         approveBtn.className = 'diff-btn approve';
-                        approveBtn.textContent = '✓ Approve & Apply';
-                        approveBtn.onclick = () => approveDiff(proposal);
+                        approveBtn.textContent = '✓ Apply Changes';
+                        approveBtn.title = 'Commit changes locally (no push)';
+                        approveBtn.onclick = () => approveDiff(proposal, false);
+
+                        const pushBtn = document.createElement('button');
+                        pushBtn.className = 'diff-btn push';
+                        pushBtn.textContent = '🚀 Commit & Push';
+                        pushBtn.title = 'Commit changes locally AND push to remote';
+                        pushBtn.onclick = () => approveDiff(proposal, true);
 
                         const rejectBtn = document.createElement('button');
                         rejectBtn.className = 'diff-btn reject';
@@ -632,16 +650,18 @@ export class ChatPanel {
                         rejectBtn.onclick = () => rejectDiff(proposal);
 
                         actions.appendChild(approveBtn);
+                        actions.appendChild(pushBtn);
                         actions.appendChild(rejectBtn);
                         diffDiv.appendChild(actions);
 
                         return diffDiv;
                     }
 
-                    function approveDiff(proposal) {
+                    function approveDiff(proposal, push) {
                         vscode.postMessage({
                             type: 'approveDiff',
-                            proposal: proposal
+                            proposal: proposal,
+                            push: push
                         });
                     }
 

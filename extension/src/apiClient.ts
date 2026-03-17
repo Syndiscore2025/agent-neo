@@ -50,13 +50,14 @@ export class ApiClient {
 
     /**
      * Approve a proposed diff.
-     * 
-     * TODO: Implement in SLICE 5
+     * @param push  When true the backend commits AND pushes to remote.
+     *              When false (default) it commits locally only.
      */
-    async approveDiff(sessionId: string, approved: boolean): Promise<any> {
+    async approveDiff(sessionId: string, approved: boolean, push: boolean = false): Promise<any> {
         const response = await this.client.post('/chat/approve', {
             session_id: sessionId,
-            approved
+            approved,
+            push
         });
         return response.data;
     }
