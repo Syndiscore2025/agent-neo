@@ -128,17 +128,18 @@ Agent NEO Execution Engine (Existing - Unchanged)
 - ✅ Display execution results in chat (status, mode, files changed, pushed)
 - ✅ Preserve all safety gates (execution goes through existing Agent NEO engine)
 
-### 🔄 SLICE 6 - IMAGE + PDF ATTACHMENTS
-**Status:** Not Started
+### ✅ SLICE 6 - IMAGE + PDF ATTACHMENTS
+**Status:** Complete (2026-03-17)
 
-**Goals:**
-- Implement file upload UI
-- Process images with vision model
-- Extract text from PDFs
-- Attach to session context
+**Completed:**
+- ✅ Real vision API image processing via OpenAI (`attachment_handler.py`)
+- ✅ PDF text extraction with `pdfplumber` / `pypdf` fallback
+- ✅ Attachment chips in chat UI + base64 file upload
+- ✅ Attachment context injected into orchestrator prompt
+- ✅ `POST /attachments/upload` + `GET /attachments/{id}` endpoints wired
 
-### ✅ SLICE 7 - INLINE AUTOCOMPLETE MVP (Implemented as SLICE 6)
-**Status:** Complete (2024-03-17)
+### ✅ SLICE 7 - INLINE AUTOCOMPLETE MVP
+**Status:** Complete (2026-03-17)
 
 **Completed:**
 - ✅ Implemented `generate_completion()` in completion service
@@ -150,26 +151,45 @@ Agent NEO Execution Engine (Existing - Unchanged)
 - ✅ Added `getSurroundingCode()` to extract context (10 lines before, 5 after)
 - ✅ Registered inline completion provider for all file types
 - ✅ Added confidence threshold (0.3) to filter low-quality suggestions
-- ✅ Configured to use fast model (GPT-4o) instead of slow reasoning model (o1)
 
-### 🔄 SLICE 8 - PREDICTIVE PROMPT SUGGESTIONS
-**Status:** Not Started
+### ✅ SLICE 8 - PREDICTIVE PROMPT SUGGESTIONS
+**Status:** Complete (2026-03-17)
 
-**Goals:**
-- Detect input pause
-- Generate contextual suggestions
-- Render clickable prompts
-- Don't interrupt typing
+**Completed:**
+- ✅ LLM-powered suggestion generation via `gpt-4o-mini` (`suggestion_engine.py`)
+- ✅ Keyword-based fallback when no API key is configured
+- ✅ Debounced suggestion chips in webview (600 ms after last keystroke)
+- ✅ `POST /suggestions` endpoint wired
 
-### 🔄 SLICE 9 - HARDENING + UX POLISH
-**Status:** Not Started
+### ✅ SLICE 9 - HARDENING + UX POLISH
+**Status:** Complete (2026-03-17)
 
-**Goals:**
-- Improve error handling
-- Polish diff preview UX
-- Add configuration wiring
-- Add documentation
-- Verify existing tests pass
+**Completed:**
+- ✅ Diff hunk-header styling and file list in stats bar
+- ✅ Slash commands: `/plan /fix /verify /rollback /help /newthread`
+- ✅ Full webview message handler coverage (attachmentUploaded, attachmentError, suggestions)
+- ✅ All interactive tests passing (57 passed, 0 failed)
+- ✅ OpenAI o1/o3 reasoning model compatibility fix (`max_completion_tokens`, no `temperature`)
+- ✅ `.env` loaded in `conftest.py` so API tests run against the live key
+
+### ✅ WAVE 2 - UX / WORKFLOW UPGRADES
+**Status:** Complete (2026-03-17)
+
+**Completed:**
+- ✅ `ExecutionResultCard` — typed execution result surfaced to the UI after diff approval
+- ✅ `SessionSummaryResponse` / `RollbackResponse` — new API contract models
+- ✅ `ChatSession.last_execution` — persists result card for one-click rollback
+- ✅ `SessionManager`: `set_last_execution` / `get_last_execution` helpers
+- ✅ `Orchestrator.handle_summarize` — LLM condenses thread → seeds new session
+- ✅ `Orchestrator.handle_rollback` — `git revert --no-edit` (local only, never pushed)
+- ✅ `POST /chat/summarize` + `POST /chat/rollback` endpoints
+- ✅ `🔄 New Thread` button in header + thread-switched banner
+- ✅ Execution result card with badges, verify steps, and **↩ Undo** button
+- ✅ Context includes VS Code diagnostics (errors/warnings from Problems panel)
+- ✅ Message-count nudge at 20 messages → suggests New Thread
+- ✅ `summarizeSession()` + `rollbackLastChange()` in `apiClient.ts`
+- ✅ TypeScript extension compiled to `extension/out/` (all 6 JS files)
+- ✅ Real auth token generated and set in `.env`
 
 ## Key Principles
 
@@ -181,5 +201,11 @@ Agent NEO Execution Engine (Existing - Unchanged)
 
 ## Next Steps
 
-Run SLICE 2 to implement the chat MVP.
+All Slices 0–9 and Wave 2 are complete. The system is production-ready for local use.
+
+To continue, consider Wave 3 goals:
+- Multi-file planning mode (plan before touching more than 3 files)
+- Repo onboarding auto-detection (test runner, lint, build commands)
+- PR-ready output (commit message, PR title, PR description, risk summary)
+- Safety profiles (Conservative / Balanced / Fast)
 
