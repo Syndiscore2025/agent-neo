@@ -30,44 +30,136 @@ class CompletionService:
     ) -> CompletionResponse:
         """
         Generate inline completion suggestion.
-        
+
         Args:
             request: Completion request
-            
+
         Returns:
             Completion response with suggestion
-            
-        TODO: Implement in SLICE 7
         """
         logger.info(f"Generating completion for {request.file_path}:{request.cursor_line}")
-        
-        # Placeholder implementation
-        # TODO: Implement actual completion logic in SLICE 7
-        # This should:
-        # 1. Build lightweight prompt from surrounding code
-        # 2. Call model with low max_tokens
-        # 3. Parse and return suggestion
-        # 4. Be FAST (< 1 second ideally)
-        
-        return CompletionResponse(
-            suggestion="",
-            confidence=0.0
-        )
+
+        try:
+            # Build lightweight prompt
+            prompt = self.build_completion_prompt(request)
+
+            # Call model with low max_tokens for speed
+            # Use a fast model (GPT-4o or similar)
+            response = await self.model_router.generate_completion(
+                prompt=prompt,
+                max_tokens=100,  # Keep it short for speed
+                temperature=0.3  # Lower temperature for more deterministic completions
+            )
+
+            # Extract suggestion from response
+            suggestion = self._extract_suggestion(response, request)
+
+            # Calculate confidence (simple heuristic for now)
+            confidence = self._calculate_confidence(suggestion, request)
+
+            logger.info(f"Generated completion: {len(suggestion)} chars, confidence={confidence:.2f}")
+
+            return CompletionResponse(
+                suggestion=suggestion,
+                confidence=confidence
+            )
+
+        except Exception as e:
+            logger.error(f"Completion generation failed: {e}", exc_info=True)
+            # Return empty suggestion on error
+            return CompletionResponse(
+                suggestion="",
+                confidence=0.0
+            )
     
     def build_completion_prompt(self, request: CompletionRequest) -> str:
         """
         Build prompt for completion request.
-        
+
         Args:
             request: Completion request
-            
+
         Returns:
             Formatted prompt
-            
-        TODO: Implement in SLICE 7
         """
-        # Placeholder
-        return f"Complete the following {request.language} code:\n\n{request.surrounding_code}"
+        language = request.language or "code"
+
+        prompt = f"""You are an expert {language} programmer. Complete the code at the cursor position.
+
+File: {request.file_path}
+Language: {language}
+
+Code context:
+```{language}
+{request.surrounding_code}
+```
+
+Provide ONLY the completion text that should appear after the cursor. Do not repeat existing code.
+Keep the completion concise and contextually appropriate.
+Do not include explanations or markdown formatting."""
+
+        return prompt
+
+    def _extract_suggestion(self, response: str, request: CompletionRequest) -> str:
+        """
+        Extract completion suggestion from model response.
+
+        Args:
+            response: Raw model response
+            request: Original request
+
+        Returns:
+            Cleaned suggestion text
+        """
+        if not response:
+            return ""
+
+        # Remove markdown code blocks if present
+        suggestion = response.strip()
+        if suggestion.startswith("```"):
+            lines = suggestion.split("\n")
+            # Remove first line (```language) and last line (```)
+            if len(lines) > 2:
+                suggestion = "\n".join(lines[1:-1])
+
+        # Trim to reasonable length (max 3 lines for inline completion)
+        lines = suggestion.split("\n")
+        if len(lines) > 3:
+            suggestion = "\n".join(lines[:3])
+
+        return suggestion.strip()
+
+    def _calculate_confidence(self, suggestion: str, request: CompletionRequest) -> float:
+        """
+        Calculate confidence score for suggestion.
+
+        Args:
+            suggestion: Generated suggestion
+            request: Original request
+
+        Returns:
+            Confidence score between 0.0 and 1.0
+        """
+        if not suggestion:
+            return 0.0
+
+        # Simple heuristic-based confidence
+        confidence = 0.5  # Base confidence
+
+        # Boost confidence if suggestion is short and focused
+        if len(suggestion) < 100:
+            confidence += 0.2
+
+        # Boost confidence if suggestion doesn't have obvious errors
+        if not any(marker in suggestion.lower() for marker in ["error", "todo", "fixme", "???"]):
+            confidence += 0.2
+
+        # Reduce confidence if suggestion is very long
+        if len(suggestion) > 200:
+            confidence -= 0.3
+
+        # Clamp to [0.0, 1.0]
+        return max(0.0, min(1.0, confidence))
 
 
 # Global completion service instance

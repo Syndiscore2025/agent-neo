@@ -189,26 +189,57 @@ class ModelRouter:
     
     async def generate_completion(
         self,
-        code_context: str,
-        cursor_position: int,
-        language: str
+        prompt: str,
+        max_tokens: int = 100,
+        temperature: float = 0.3
     ) -> str:
         """
-        Generate inline code completion.
-        
+        Generate inline code completion (lightweight, fast).
+
         Args:
-            code_context: Surrounding code
-            cursor_position: Cursor position
-            language: Programming language
-            
+            prompt: Completion prompt
+            max_tokens: Maximum tokens to generate
+            temperature: Sampling temperature
+
         Returns:
             Completion suggestion
-            
-        TODO: Implement lightweight completion in SLICE 7
         """
-        logger.info(f"Generating completion for {language}")
-        
-        # Placeholder implementation
+        logger.info(f"Generating completion with max_tokens={max_tokens}")
+
+        # Use GPT-4o for completions (faster than o1)
+        # o1 is too slow for inline completions
+        if self.openai_api_key:
+            try:
+                response = self._openai_client.chat.completions.create(
+                    model="gpt-4o",  # Use fast model for completions
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+                return response.choices[0].message.content or ""
+            except Exception as e:
+                logger.error(f"OpenAI completion error: {e}")
+                return ""
+
+        # Fallback to Claude if OpenAI not available
+        if self.anthropic_api_key:
+            try:
+                response = self._anthropic_client.messages.create(
+                    model="claude-3-5-sonnet-20241022",
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+                return response.content[0].text
+            except Exception as e:
+                logger.error(f"Anthropic completion error: {e}")
+                return ""
+
+        logger.warning("No API keys configured for completion")
         return ""
     
     def is_configured(self) -> bool:

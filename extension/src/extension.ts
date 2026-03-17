@@ -30,7 +30,15 @@ export function activate(context: vscode.ExtensionContext) {
     const config = vscode.workspace.getConfiguration('agentNeo');
     if (config.get('enableInlineCompletion', true)) {
         completionProvider = new CompletionProvider();
-        // TODO: Register completion provider in SLICE 7
+
+        // Register inline completion provider for all languages
+        const provider = vscode.languages.registerInlineCompletionItemProvider(
+            { pattern: '**' },  // All files
+            completionProvider
+        );
+
+        context.subscriptions.push(provider);
+        console.log('Agent NEO inline completion provider registered');
     }
 
     // Register commands

@@ -77,15 +77,15 @@ class TestModelRouter:
     
     @pytest.mark.asyncio
     async def test_generate_completion_placeholder(self):
-        """Test completion generation (placeholder)."""
+        """Test completion generation."""
         router = ModelRouter()
         completion = await router.generate_completion(
-            code_context="def test():",
-            cursor_position=10,
-            language="python"
+            prompt="Complete this Python code: def test():",
+            max_tokens=50,
+            temperature=0.3
         )
-        
-        # Placeholder returns empty string
+
+        # Returns empty string if no API keys configured
         assert isinstance(completion, str)
     
     def test_is_configured(self):
