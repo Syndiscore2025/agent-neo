@@ -78,40 +78,125 @@ class AttachmentHandler:
     
     async def _process_image(self, file_path: Path) -> Optional[str]:
         """
-        Process image attachment.
-        
+        Process image via GPT-4o vision API.
+
         Args:
             file_path: Path to image file
-            
+
         Returns:
-            Extracted text/description
-            
-        TODO: Implement in SLICE 6
-        - Use vision model for image analysis
-        - Extract text if present (OCR)
+            Extracted text/description from the image
         """
-        logger.info(f"Processing image: {file_path}")
-        # Placeholder
-        return "[Image uploaded - analysis pending]"
-    
+        import os
+        logger.info(f"Processing image via vision API: {file_path.name}")
+
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            logger.warning("OPENAI_API_KEY not set — skipping vision analysis")
+            return "[Image attached — set OPENAI_API_KEY to enable vision analysis]"
+
+        try:
+            from openai import AsyncOpenAI
+
+            image_bytes = file_path.read_bytes()
+            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+            suffix = file_path.suffix.lower()
+            mime_map = {
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".gif": "image/gif",
+                ".webp": "image/webp",
+            }
+            mime_type = mime_map.get(suffix, "image/png")
+
+            client = AsyncOpenAI(api_key=api_key)
+            response = await client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{image_b64}",
+                                    "detail": "high",
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Describe this image in detail. "
+                                    "If it contains code, extract it exactly. "
+                                    "If it contains text, transcribe it. "
+                                    "If it is a diagram or UI screenshot, describe the structure and layout."
+                                ),
+                            },
+                        ],
+                    }
+                ],
+                max_tokens=1500,
+            )
+            return response.choices[0].message.content
+
+        except Exception as e:
+            logger.error(f"Image analysis failed: {e}")
+            return f"[Image analysis failed: {e}]"
+
     async def _process_pdf(self, file_path: Path) -> Optional[str]:
         """
-        Process PDF attachment.
-        
+        Extract text from PDF using pdfplumber (falls back to pypdf).
+
         Args:
             file_path: Path to PDF file
-            
+
         Returns:
-            Extracted text content
-            
-        TODO: Implement in SLICE 6
-        - Extract text from PDF
-        - Handle multi-page documents
-        - Chunk if too large
+            Extracted text content (first 20 pages, max 15 000 chars)
         """
-        logger.info(f"Processing PDF: {file_path}")
-        # Placeholder
-        return "[PDF uploaded - extraction pending]"
+        logger.info(f"Extracting text from PDF: {file_path.name}")
+
+        MAX_PAGES = 20
+        MAX_CHARS = 15_000
+
+        try:
+            import pdfplumber
+
+            pages_text: list[str] = []
+            with pdfplumber.open(file_path) as pdf:
+                for i, page in enumerate(pdf.pages):
+                    if i >= MAX_PAGES:
+                        pages_text.append("... (truncated — first 20 pages shown)")
+                        break
+                    text = page.extract_text() or ""
+                    if text.strip():
+                        pages_text.append(f"--- Page {i + 1} ---\n{text.strip()}")
+
+            full_text = "\n\n".join(pages_text)
+            if len(full_text) > MAX_CHARS:
+                full_text = full_text[:MAX_CHARS] + "\n... (truncated)"
+            return full_text or "[No extractable text found in PDF]"
+
+        except Exception as primary_err:
+            logger.warning(f"pdfplumber failed ({primary_err}), trying pypdf fallback")
+            try:
+                from pypdf import PdfReader
+
+                reader = PdfReader(file_path)
+                pages_text = []
+                for i, page in enumerate(reader.pages):
+                    if i >= MAX_PAGES:
+                        break
+                    text = page.extract_text() or ""
+                    if text.strip():
+                        pages_text.append(f"--- Page {i + 1} ---\n{text.strip()}")
+                full_text = "\n\n".join(pages_text)
+                if len(full_text) > MAX_CHARS:
+                    full_text = full_text[:MAX_CHARS] + "\n... (truncated)"
+                return full_text or "[No extractable text found in PDF]"
+            except Exception as fallback_err:
+                logger.error(f"PDF extraction fallback failed: {fallback_err}")
+                return f"[PDF extraction failed: {primary_err}]"
     
     def get_attachment(self, attachment_id: str) -> Optional[AttachmentResponse]:
         """

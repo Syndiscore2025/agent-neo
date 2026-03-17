@@ -40,6 +40,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     message: str = Field(..., min_length=1)
     context: Optional[ChatContext] = None
+    attachment_ids: Optional[List[str]] = Field(default_factory=list)
 
 
 class DiffProposal(BaseModel):

@@ -19,6 +19,7 @@ from app.interactive.session_manager import get_session_manager
 from app.interactive.model_router import get_model_router
 from app.interactive.context_engine import get_context_engine
 from app.interactive.action_planner import get_action_planner
+from app.interactive.attachment_handler import get_attachment_handler
 from app.core.contracts import TaskRequest
 from app.core.engine import Engine
 
@@ -85,12 +86,29 @@ class InteractiveOrchestrator:
         # Detect intent first
         intent = self.action_planner.detect_intent(request.message)
 
+        # Collect attachment content if any IDs were provided
+        attachment_context = ""
+        if request.attachment_ids:
+            attachment_handler = get_attachment_handler()
+            for att_id in request.attachment_ids:
+                att = attachment_handler.get_attachment(att_id)
+                if att and att.extracted_content:
+                    attachment_context += (
+                        f"\n[Attachment: {att.file_name}]\n{att.extracted_content}\n"
+                    )
+            if attachment_context:
+                logger.info(
+                    f"Injecting {len(request.attachment_ids)} attachment(s) into prompt "
+                    f"for session {session_id}"
+                )
+
         # Build enriched prompt with context and intent
         enriched_prompt = self._build_enriched_prompt(
             user_message=request.message,
             context=context,
             session=session,
-            intent=intent
+            intent=intent,
+            attachment_context=attachment_context,
         )
 
         # Generate model response
@@ -162,7 +180,8 @@ class InteractiveOrchestrator:
         user_message: str,
         context: dict,
         session: any,
-        intent: str = "conversational"
+        intent: str = "conversational",
+        attachment_context: str = "",
     ) -> str:
         """
         Build enriched prompt with context and history.
@@ -245,6 +264,12 @@ class InteractiveOrchestrator:
                     else:
                         parts.append(f"- {r}")
                 parts.append("")
+
+        # Add attachment context if provided
+        if attachment_context.strip():
+            parts.append("Attached files:")
+            parts.append(attachment_context.strip())
+            parts.append("")
 
         # Add recent conversation history (last 5 messages)
         if session and len(session.messages) > 1:

@@ -74,7 +74,7 @@ export class ChatPanel {
 
         switch (message.type) {
             case 'sendMessage':
-                await this.handleSendMessage(message.message, message.context);
+                await this.handleSendMessage(message.message, message.context, message.attachmentIds);
                 break;
             case 'clearSession':
                 await this.handleClearSession();
@@ -91,13 +91,19 @@ export class ChatPanel {
                     await this.loadHistory();
                 }
                 break;
+            case 'uploadAttachment':
+                await this.handleUploadAttachment(message.fileName, message.fileType, message.contentBase64);
+                break;
+            case 'getSuggestions':
+                await this.handleGetSuggestions(message.currentInput, message.context);
+                break;
         }
     }
 
     /**
      * Handle sending a message to the backend.
      */
-    private async handleSendMessage(message: string, context?: any) {
+    private async handleSendMessage(message: string, context?: any, attachmentIds?: string[]) {
         try {
             // Show loading state
             this.panel?.webview.postMessage({
@@ -110,11 +116,12 @@ export class ChatPanel {
                 context = this.getCurrentContext();
             }
 
-            // Send to backend
+            // Send to backend (with optional attachment IDs)
             const response = await this.apiClient.sendChatMessage(
                 message,
                 this.sessionId,
-                context
+                context,
+                attachmentIds
             );
 
             // Update session ID
@@ -504,6 +511,88 @@ export class ChatPanel {
                         opacity: 0.5;
                         cursor: not-allowed;
                     }
+
+                    /* ── Attach button ── */
+                    #attachBtn {
+                        background: var(--vscode-button-secondaryBackground, var(--vscode-input-background));
+                        color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+                        border: 1px solid var(--vscode-input-border);
+                        padding: 8px 10px;
+                        cursor: pointer;
+                        font-size: 16px;
+                        border-radius: 2px;
+                        line-height: 1;
+                    }
+                    #attachBtn:hover { opacity: 0.8; }
+
+                    /* ── Pending attachment chips (in input area) ── */
+                    #attachmentPreview {
+                        display: flex;
+                        flex-wrap: wrap;
+                        gap: 4px;
+                        padding: 4px 16px 0;
+                    }
+                    .attachment-chip {
+                        display: flex;
+                        align-items: center;
+                        gap: 4px;
+                        background: var(--vscode-badge-background);
+                        color: var(--vscode-badge-foreground);
+                        border-radius: 10px;
+                        padding: 2px 8px;
+                        font-size: 11px;
+                    }
+                    .attachment-chip .remove-att {
+                        cursor: pointer;
+                        font-size: 13px;
+                        line-height: 1;
+                        opacity: 0.7;
+                    }
+                    .attachment-chip .remove-att:hover { opacity: 1; }
+
+                    /* ── Suggestion chips ── */
+                    #suggestionsContainer {
+                        padding: 4px 16px;
+                        display: flex;
+                        flex-wrap: wrap;
+                        gap: 6px;
+                        min-height: 0;
+                    }
+                    .suggestion-chip {
+                        background: var(--vscode-input-background);
+                        color: var(--vscode-foreground);
+                        border: 1px solid var(--vscode-input-border);
+                        border-radius: 10px;
+                        padding: 3px 10px;
+                        font-size: 11px;
+                        cursor: pointer;
+                        transition: background 0.15s;
+                    }
+                    .suggestion-chip:hover {
+                        background: var(--vscode-list-hoverBackground);
+                        border-color: var(--vscode-focusBorder);
+                    }
+
+                    /* ── Diff improvements (SLICE 9) ── */
+                    .diff-file-label {
+                        font-size: 11px;
+                        font-family: var(--vscode-editor-font-family);
+                        opacity: 0.8;
+                        margin-bottom: 4px;
+                        padding: 2px 4px;
+                        background: var(--vscode-editor-background);
+                        border-radius: 2px;
+                    }
+                    .diff-line.hunk {
+                        color: var(--vscode-textLink-foreground);
+                        background: transparent;
+                        font-style: italic;
+                    }
+                    .diff-btn.push {
+                        background: var(--vscode-button-secondaryBackground, #2d5fa8);
+                        color: var(--vscode-button-secondaryForeground, #ffffff);
+                    }
+                    .diff-btn.push:hover { opacity: 0.85; }
                 </style>
             </head>
             <body>
@@ -514,7 +603,12 @@ export class ChatPanel {
 
                 <div id="messages"></div>
 
+                <div id="suggestionsContainer"></div>
+                <div id="attachmentPreview"></div>
+
                 <div id="inputArea">
+                    <button id="attachBtn" title="Attach image or PDF">📎</button>
+                    <input type="file" id="fileInput" accept="image/*,.pdf" style="display:none">
                     <textarea id="messageInput" placeholder="Ask Agent NEO anything..." rows="1"></textarea>
                     <button id="sendBtn">Send</button>
                 </div>
@@ -525,13 +619,29 @@ export class ChatPanel {
                     const messageInput = document.getElementById('messageInput');
                     const sendBtn = document.getElementById('sendBtn');
                     const clearBtn = document.getElementById('clearBtn');
+                    const attachBtn = document.getElementById('attachBtn');
+                    const fileInput = document.getElementById('fileInput');
+                    const suggestionsContainer = document.getElementById('suggestionsContainer');
+                    const attachmentPreview = document.getElementById('attachmentPreview');
 
                     let isLoading = false;
+                    // SLICE 6 — pending attachments accumulate until message is sent
+                    let pendingAttachmentIds = [];
+                    // SLICE 8 — typing debounce timer
+                    let suggestionTimer = null;
 
-                    // Auto-resize textarea
+                    // ── Auto-resize textarea ──
                     messageInput.addEventListener('input', () => {
                         messageInput.style.height = 'auto';
                         messageInput.style.height = messageInput.scrollHeight + 'px';
+                        // SLICE 8 — debounced suggestion fetch (600 ms after last keystroke)
+                        clearTimeout(suggestionTimer);
+                        const val = messageInput.value.trim();
+                        if (val.length >= 2) {
+                            suggestionTimer = setTimeout(() => fetchSuggestions(val), 600);
+                        } else {
+                            clearSuggestions();
+                        }
                     });
 
                     // Send message on Enter (Shift+Enter for new line)
@@ -545,25 +655,102 @@ export class ChatPanel {
                     sendBtn.addEventListener('click', sendMessage);
                     clearBtn.addEventListener('click', clearSession);
 
+                    // ── SLICE 6 — attach button ──
+                    attachBtn.addEventListener('click', () => fileInput.click());
+
+                    fileInput.addEventListener('change', () => {
+                        const file = fileInput.files && fileInput.files[0];
+                        if (!file) return;
+                        fileInput.value = ''; // reset so same file can be re-selected
+
+                        const isPdf = file.type === 'application/pdf' || file.name.endsWith('.pdf');
+                        const fileType = isPdf ? 'pdf' : 'image';
+
+                        const reader = new FileReader();
+                        reader.onload = (ev) => {
+                            // Strip data-URL prefix: "data:<mime>;base64,"
+                            const dataUrl = ev.target.result;
+                            const base64 = dataUrl.split(',')[1];
+                            vscode.postMessage({
+                                type: 'uploadAttachment',
+                                fileName: file.name,
+                                fileType: fileType,
+                                contentBase64: base64
+                            });
+                        };
+                        reader.readAsDataURL(file);
+                    });
+
                     function sendMessage() {
                         const message = messageInput.value.trim();
                         if (!message || isLoading) return;
 
-                        // Clear input
+                        // Clear input and suggestions
                         messageInput.value = '';
                         messageInput.style.height = 'auto';
+                        clearSuggestions();
+
+                        // Capture and reset pending attachments
+                        const attachmentIds = [...pendingAttachmentIds];
+                        pendingAttachmentIds = [];
+                        attachmentPreview.innerHTML = '';
 
                         // Send to extension
                         vscode.postMessage({
                             type: 'sendMessage',
-                            message: message
+                            message: message,
+                            attachmentIds: attachmentIds.length > 0 ? attachmentIds : undefined
                         });
                     }
 
                     function clearSession() {
                         if (confirm('Clear chat session?')) {
+                            pendingAttachmentIds = [];
+                            attachmentPreview.innerHTML = '';
+                            clearSuggestions();
                             vscode.postMessage({ type: 'clearSession' });
                         }
+                    }
+
+                    // ── SLICE 8 — Suggestions ──
+                    function fetchSuggestions(input) {
+                        vscode.postMessage({ type: 'getSuggestions', currentInput: input });
+                    }
+
+                    function clearSuggestions() {
+                        suggestionsContainer.innerHTML = '';
+                    }
+
+                    function renderSuggestions(suggestions) {
+                        suggestionsContainer.innerHTML = '';
+                        suggestions.forEach(text => {
+                            const chip = document.createElement('button');
+                            chip.className = 'suggestion-chip';
+                            chip.textContent = text;
+                            chip.onclick = () => {
+                                messageInput.value = text;
+                                messageInput.dispatchEvent(new Event('input'));
+                                clearSuggestions();
+                                messageInput.focus();
+                            };
+                            suggestionsContainer.appendChild(chip);
+                        });
+                    }
+
+                    // ── SLICE 6 — Attachment preview in input bar ──
+                    function addAttachmentChip(attachmentId, fileName) {
+                        pendingAttachmentIds.push(attachmentId);
+                        const chip = document.createElement('div');
+                        chip.className = 'attachment-chip';
+                        chip.dataset.id = attachmentId;
+                        chip.innerHTML =
+                            '<span>📎 ' + fileName + '</span>' +
+                            '<span class="remove-att" title="Remove">×</span>';
+                        chip.querySelector('.remove-att').onclick = () => {
+                            pendingAttachmentIds = pendingAttachmentIds.filter(id => id !== attachmentId);
+                            chip.remove();
+                        };
+                        attachmentPreview.appendChild(chip);
                     }
 
                     function addMessage(role, content, diffProposal = null) {
@@ -601,13 +788,17 @@ export class ChatPanel {
                         header.textContent = '📝 Proposed Changes';
                         diffDiv.appendChild(header);
 
-                        // Stats
+                        // Stats + file list (SLICE 9 improvement)
                         const stats = document.createElement('div');
                         stats.className = 'diff-stats';
-                        stats.textContent = `${proposal.files_changed.length} file(s) | +${proposal.additions} -${proposal.deletions}`;
+                        const fileList = (proposal.files_changed || []).join(', ') || 'unknown';
+                        stats.textContent =
+                            proposal.files_changed.length + ' file(s) changed  |  ' +
+                            '+' + proposal.additions + '  -' + proposal.deletions + '  |  ' +
+                            fileList;
                         diffDiv.appendChild(stats);
 
-                        // Diff content
+                        // Diff content — with hunk-header styling (SLICE 9)
                         const diffContent = document.createElement('div');
                         diffContent.className = 'diff-content';
 
@@ -616,7 +807,9 @@ export class ChatPanel {
                             const lineDiv = document.createElement('div');
                             lineDiv.className = 'diff-line';
 
-                            if (line.startsWith('+') && !line.startsWith('+++')) {
+                            if (line.startsWith('@@')) {
+                                lineDiv.classList.add('hunk');
+                            } else if (line.startsWith('+') && !line.startsWith('+++')) {
                                 lineDiv.classList.add('add');
                             } else if (line.startsWith('-') && !line.startsWith('---')) {
                                 lineDiv.classList.add('remove');
@@ -712,6 +905,20 @@ export class ChatPanel {
                                     addMessage(msg.role, msg.content);
                                 });
                                 break;
+
+                            // SLICE 6 — attachment responses
+                            case 'attachmentUploaded':
+                                addAttachmentChip(message.attachmentId, message.fileName);
+                                break;
+
+                            case 'attachmentError':
+                                addMessage('error', '⚠️ Attachment: ' + message.message);
+                                break;
+
+                            // SLICE 8 — suggestion chips
+                            case 'suggestions':
+                                renderSuggestions(message.suggestions || []);
+                                break;
                         }
                     });
 
@@ -721,6 +928,56 @@ export class ChatPanel {
             </body>
             </html>
         `;
+    }
+
+    /**
+     * Handle file attachment upload from webview.
+     */
+    private async handleUploadAttachment(fileName: string, fileType: 'image' | 'pdf', contentBase64: string) {
+        try {
+            if (!this.sessionId) {
+                // Create a temporary session ID; will be replaced on first chat send
+                this.sessionId = `tmp-${Date.now()}`;
+            }
+            const result = await this.apiClient.uploadAttachment(
+                this.sessionId,
+                fileName,
+                fileType,
+                contentBase64
+            );
+            this.panel?.webview.postMessage({
+                type: 'attachmentUploaded',
+                attachmentId: result.attachment_id,
+                fileName: result.file_name,
+                fileType: result.file_type
+            });
+        } catch (error: any) {
+            console.error('Attachment upload failed:', error);
+            this.panel?.webview.postMessage({
+                type: 'attachmentError',
+                message: `Upload failed: ${error.message}`
+            });
+        }
+    }
+
+    /**
+     * Handle suggestions request from webview.
+     */
+    private async handleGetSuggestions(currentInput: string, context?: any) {
+        try {
+            const config = vscode.workspace.getConfiguration('agentNeo');
+            if (!config.get('enableSuggestions', true)) {
+                return;
+            }
+            const result = await this.apiClient.getSuggestions(currentInput, this.sessionId, context);
+            this.panel?.webview.postMessage({
+                type: 'suggestions',
+                suggestions: result.suggestions || []
+            });
+        } catch (error: any) {
+            // Suggestions are non-critical — silently ignore failures
+            console.debug('Suggestions request failed:', error.message);
+        }
     }
 
     /**

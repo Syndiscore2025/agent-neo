@@ -27,13 +27,19 @@ export class ApiClient {
     }
 
     /**
-     * Send a chat message.
+     * Send a chat message (with optional attachment IDs).
      */
-    async sendChatMessage(message: string, sessionId?: string, context?: any): Promise<any> {
+    async sendChatMessage(
+        message: string,
+        sessionId?: string,
+        context?: any,
+        attachmentIds?: string[]
+    ): Promise<any> {
         const response = await this.client.post('/chat', {
             message,
             session_id: sessionId,
-            context
+            context,
+            attachment_ids: attachmentIds && attachmentIds.length > 0 ? attachmentIds : undefined
         });
         return response.data;
     }
@@ -74,8 +80,6 @@ export class ApiClient {
 
     /**
      * Get code completion.
-     * 
-     * TODO: Implement in SLICE 7
      */
     async getCompletion(
         filePath: string,
@@ -95,9 +99,7 @@ export class ApiClient {
     }
 
     /**
-     * Upload an attachment.
-     * 
-     * TODO: Implement in SLICE 6
+     * Upload an image or PDF attachment.
      */
     async uploadAttachment(
         sessionId: string,
@@ -115,9 +117,7 @@ export class ApiClient {
     }
 
     /**
-     * Get prompt suggestions.
-     * 
-     * TODO: Implement in SLICE 8
+     * Get contextual prompt suggestions.
      */
     async getSuggestions(currentInput: string, sessionId?: string, context?: any): Promise<any> {
         const response = await this.client.post('/suggestions', {
