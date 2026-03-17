@@ -8,6 +8,25 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 
 
+# ---------------------------------------------------------------------------
+# Execution result card — typed subset of core ExecuteResponse surfaced to UI
+# ---------------------------------------------------------------------------
+class ExecutionResultCard(BaseModel):
+    """Structured execution result surfaced to the chat UI after diff approval."""
+    status: str                                          # "Working" | "Broken"
+    mode: str                                            # "CRITICAL" | "RAPID"
+    commit_sha: Optional[str] = None
+    files_changed: List[str] = Field(default_factory=list)
+    lines_changed: int = 0
+    pushed: bool = False
+    verify_steps: List[str] = Field(default_factory=list)
+    rollback_command: Optional[str] = None
+    pre_test_passed: Optional[bool] = None
+    post_test_passed: Optional[bool] = None
+    validation_passed: Optional[bool] = None
+    error: Optional[str] = None
+
+
 class ActionType(str):
     """Action types for chat responses."""
     CONVERSATIONAL = "conversational"
@@ -67,6 +86,7 @@ class ChatSession(BaseModel):
     messages: List[ChatMessage] = Field(default_factory=list)
     proposed_diff: Optional[str] = None
     context: Optional[ChatContext] = None
+    last_execution: Optional[ExecutionResultCard] = None   # for rollback
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -90,7 +110,7 @@ class ApprovalResponse(BaseModel):
     session_id: str
     approved: bool
     message: str
-    execution_result: Optional[Dict[str, Any]] = None
+    execution_result: Optional[ExecutionResultCard] = None
 
 
 class CompletionRequest(BaseModel):
@@ -136,4 +156,36 @@ class SuggestionRequest(BaseModel):
 class SuggestionResponse(BaseModel):
     """Response with prompt suggestions."""
     suggestions: List[str]
+
+
+# ---------------------------------------------------------------------------
+# Thread-switching / new-agent handoff
+# ---------------------------------------------------------------------------
+class SummarizeRequest(BaseModel):
+    """Request to summarise the current session and hand off to a new thread."""
+    session_id: str
+
+
+class SessionSummaryResponse(BaseModel):
+    """Response carrying a digest of the old thread + a fresh session ID."""
+    old_session_id: str
+    new_session_id: str
+    summary: str                    # LLM-generated digest injected as system context
+    message_count_was: int          # how many messages were in the old session
+
+
+# ---------------------------------------------------------------------------
+# Rollback
+# ---------------------------------------------------------------------------
+class RollbackRequest(BaseModel):
+    """Request to undo the last applied change."""
+    session_id: str
+
+
+class RollbackResponse(BaseModel):
+    """Response after attempting a git rollback."""
+    session_id: str
+    success: bool
+    message: str
+    commit_reverted: Optional[str] = None
 

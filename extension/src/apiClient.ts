@@ -129,6 +129,27 @@ export class ApiClient {
     }
 
     /**
+     * Summarise the current session and return a new session ID pre-seeded
+     * with that summary.  Call this when the thread is getting too long.
+     */
+    async summarizeSession(sessionId: string): Promise<any> {
+        const response = await this.client.post('/chat/summarize', {
+            session_id: sessionId
+        });
+        return response.data;
+    }
+
+    /**
+     * Rollback the last applied diff by running git revert locally (no push).
+     */
+    async rollbackLastChange(sessionId: string): Promise<any> {
+        const response = await this.client.post('/chat/rollback', {
+            session_id: sessionId
+        });
+        return response.data;
+    }
+
+    /**
      * Check API health.
      */
     async checkHealth(): Promise<boolean> {

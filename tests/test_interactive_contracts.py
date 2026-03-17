@@ -19,7 +19,12 @@ from app.interactive.contracts import (
     SuggestionRequest,
     SuggestionResponse,
     DiffProposal,
-    ActionType
+    ActionType,
+    ExecutionResultCard,
+    SummarizeRequest,
+    SessionSummaryResponse,
+    RollbackRequest,
+    RollbackResponse,
 )
 
 
@@ -170,6 +175,108 @@ class TestContracts:
         response = SuggestionResponse(
             suggestions=["Explain this code", "Explain this function"]
         )
-        
+
         assert len(response.suggestions) == 2
+
+    # ------------------------------------------------------------------
+    # Wave 2 — new contract models
+    # ------------------------------------------------------------------
+    def test_execution_result_card_minimal(self):
+        """Test ExecutionResultCard with minimal fields."""
+        card = ExecutionResultCard(status="Working", mode="CRITICAL")
+        assert card.status == "Working"
+        assert card.mode == "CRITICAL"
+        assert card.commit_sha is None
+        assert card.files_changed == []
+        assert card.lines_changed == 0
+        assert card.pushed is False
+        assert card.verify_steps == []
+        assert card.error is None
+
+    def test_execution_result_card_full(self):
+        """Test ExecutionResultCard with all fields."""
+        card = ExecutionResultCard(
+            status="Broken",
+            mode="CRITICAL",
+            commit_sha="abc123def456",
+            files_changed=["app/main.py", "app/core.py"],
+            lines_changed=42,
+            pushed=True,
+            verify_steps=["pytest passed", "lint clean"],
+            rollback_command="git revert abc123def456",
+            pre_test_passed=True,
+            post_test_passed=False,
+            validation_passed=True,
+            error="Post-test failure",
+        )
+        assert card.commit_sha == "abc123def456"
+        assert len(card.files_changed) == 2
+        assert card.lines_changed == 42
+        assert card.pushed is True
+        assert card.pre_test_passed is True
+        assert card.post_test_passed is False
+        assert card.error == "Post-test failure"
+
+    def test_summarize_request(self):
+        """Test SummarizeRequest model."""
+        req = SummarizeRequest(session_id="sess-abc")
+        assert req.session_id == "sess-abc"
+
+    def test_session_summary_response(self):
+        """Test SessionSummaryResponse model."""
+        resp = SessionSummaryResponse(
+            old_session_id="old-123",
+            new_session_id="new-456",
+            summary="The developer fixed a bug in the parser.",
+            message_count_was=25,
+        )
+        assert resp.old_session_id == "old-123"
+        assert resp.new_session_id == "new-456"
+        assert resp.message_count_was == 25
+        assert "parser" in resp.summary
+
+    def test_rollback_request(self):
+        """Test RollbackRequest model."""
+        req = RollbackRequest(session_id="sess-xyz")
+        assert req.session_id == "sess-xyz"
+
+    def test_rollback_response_success(self):
+        """Test RollbackResponse on success."""
+        resp = RollbackResponse(
+            session_id="sess-xyz",
+            success=True,
+            message="✓ Rolled back commit abc12345.",
+            commit_reverted="abc12345",
+        )
+        assert resp.success is True
+        assert resp.commit_reverted == "abc12345"
+
+    def test_rollback_response_failure(self):
+        """Test RollbackResponse on failure."""
+        resp = RollbackResponse(
+            session_id="sess-xyz",
+            success=False,
+            message="No previous execution found.",
+        )
+        assert resp.success is False
+        assert resp.commit_reverted is None
+
+    def test_chat_session_stores_last_execution(self):
+        """Test that ChatSession accepts and stores last_execution."""
+        card = ExecutionResultCard(status="Working", mode="CRITICAL", commit_sha="deadbeef")
+        session = ChatSession(session_id="test-sess", last_execution=card)
+        assert session.last_execution is not None
+        assert session.last_execution.commit_sha == "deadbeef"
+
+    def test_approval_response_uses_execution_result_card(self):
+        """Test ApprovalResponse.execution_result is typed as ExecutionResultCard."""
+        card = ExecutionResultCard(status="Working", mode="CRITICAL")
+        resp = ApprovalResponse(
+            session_id="s1",
+            approved=True,
+            message="Applied.",
+            execution_result=card,
+        )
+        assert isinstance(resp.execution_result, ExecutionResultCard)
+        assert resp.execution_result.status == "Working"
 

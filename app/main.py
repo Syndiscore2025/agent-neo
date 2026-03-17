@@ -35,7 +35,11 @@ from app.interactive.contracts import (
     AttachmentUpload,
     AttachmentResponse,
     SuggestionRequest,
-    SuggestionResponse
+    SuggestionResponse,
+    SummarizeRequest,
+    SessionSummaryResponse,
+    RollbackRequest,
+    RollbackResponse,
 )
 from app.interactive.orchestrator import get_orchestrator
 from app.interactive.session_manager import get_session_manager
@@ -575,6 +579,49 @@ async def approve_diff(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/chat/summarize", response_model=SessionSummaryResponse)
+async def summarize_session(
+    request: SummarizeRequest,
+    _: str = Depends(verify_bearer_token)
+):
+    """
+    Summarise the current session and create a new session pre-seeded with
+    that summary so the user can continue without losing context.
+
+    Call this when a thread becomes too long to maintain effective context.
+    """
+    try:
+        orchestrator = get_orchestrator(engine)
+        response = await orchestrator.handle_summarize(request)
+        return response
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Session summarise failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/chat/rollback", response_model=RollbackResponse)
+async def rollback_last_change(
+    request: RollbackRequest,
+    _: str = Depends(verify_bearer_token)
+):
+    """
+    Undo the last applied diff by running ``git revert --no-edit`` locally.
+
+    The revert commit is created locally only — never pushed automatically.
+    """
+    try:
+        orchestrator = get_orchestrator(engine)
+        response = await orchestrator.handle_rollback(request)
+        return response
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Rollback failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.delete("/chat/session")
 async def delete_chat_session(
     session_id: str,
@@ -703,6 +750,8 @@ async def root():
             "chat_history": "/chat/history",
             "chat_approve": "/chat/approve",
             "chat_reject": "/chat/reject",
+            "chat_summarize": "/chat/summarize",
+            "chat_rollback": "/chat/rollback",
             "chat_session": "/chat/session",
             "complete": "/complete",
             "attachments_upload": "/attachments/upload",

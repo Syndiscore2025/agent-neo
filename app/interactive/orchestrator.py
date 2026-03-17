@@ -4,6 +4,7 @@ Main orchestration logic for interactive chat workflow.
 """
 
 import logging
+import subprocess
 from typing import Optional
 from datetime import datetime
 
@@ -13,7 +14,12 @@ from app.interactive.contracts import (
     ChatMessage,
     ApprovalRequest,
     ApprovalResponse,
-    ActionType
+    ActionType,
+    ExecutionResultCard,
+    SummarizeRequest,
+    SessionSummaryResponse,
+    RollbackRequest,
+    RollbackResponse,
 )
 from app.interactive.session_manager import get_session_manager
 from app.interactive.model_router import get_model_router
@@ -336,34 +342,54 @@ class InteractiveOrchestrator:
             # Clear proposed diff after successful execution
             self.session_manager.clear_proposed_diff(request.session_id)
 
+            # Build typed result card (no invalid fields referenced)
+            result_card = ExecutionResultCard(
+                status=execution_result.status,
+                mode=execution_result.mode,
+                commit_sha=execution_result.commit_sha,
+                files_changed=execution_result.files_changed,
+                lines_changed=execution_result.lines_changed,
+                pushed=execution_result.pushed,
+                verify_steps=execution_result.verify_steps or [],
+                rollback_command=execution_result.rollback_command,
+                pre_test_passed=(
+                    execution_result.pre_test_result.passed
+                    if execution_result.pre_test_result else None
+                ),
+                post_test_passed=(
+                    execution_result.post_test_result.passed
+                    if execution_result.post_test_result else None
+                ),
+                validation_passed=(
+                    execution_result.validation_result.passed
+                    if execution_result.validation_result else None
+                ),
+                error=execution_result.error,
+            )
+
+            # Persist for rollback
+            self.session_manager.set_last_execution(request.session_id, result_card)
+
             # Format success message
             message = f"✓ Changes applied successfully!\n"
-            message += f"Status: {execution_result.status}\n"
-            message += f"Mode: {execution_result.mode}\n"
-
+            message += f"Status: {execution_result.status} | Mode: {execution_result.mode}\n"
+            if execution_result.commit_sha:
+                message += f"Commit: {execution_result.commit_sha[:8]}\n"
             if execution_result.files_changed:
                 message += f"Files changed: {len(execution_result.files_changed)}\n"
-
             if execution_result.pushed:
-                message += f"Changes pushed to remote: {execution_result.pushed}\n"
+                message += "Pushed to remote ✓\n"
 
             logger.info(
                 f"Diff executed successfully for session {request.session_id} | "
-                f"status={execution_result.status} | "
-                f"mode={execution_result.mode}"
+                f"status={execution_result.status} | mode={execution_result.mode}"
             )
 
             return ApprovalResponse(
                 session_id=request.session_id,
                 approved=True,
                 message=message,
-                execution_result={
-                    "status": execution_result.status,
-                    "mode": execution_result.mode,
-                    "files_changed": execution_result.files_changed,
-                    "pushed": execution_result.pushed,
-                    "logs": execution_result.logs[-10:] if execution_result.logs else []  # Last 10 logs
-                }
+                execution_result=result_card,
             )
 
         except Exception as e:
@@ -376,10 +402,145 @@ class InteractiveOrchestrator:
                 session_id=request.session_id,
                 approved=True,
                 message=f"✗ Execution failed: {str(e)}",
-                execution_result={
-                    "status": "failed",
-                    "error": str(e)
-                }
+                execution_result=ExecutionResultCard(
+                    status="Broken",
+                    mode="CRITICAL",
+                    error=str(e),
+                ),
+            )
+
+
+    # ------------------------------------------------------------------
+    # Thread-switching: summarise + hand off to a new session
+    # ------------------------------------------------------------------
+    async def handle_summarize(self, request: SummarizeRequest) -> SessionSummaryResponse:
+        """
+        Summarise the current session with the LLM and start a fresh session
+        whose system context is pre-seeded with that summary.
+
+        This lets the user continue working without hitting context limits.
+        """
+        session = self.session_manager.get_session(request.session_id)
+        if not session:
+            raise ValueError(f"Session not found: {request.session_id}")
+
+        message_count = len(session.messages)
+
+        # Build a transcript for the LLM to summarise
+        transcript_parts = ["CONVERSATION TRANSCRIPT TO SUMMARISE:"]
+        for msg in session.messages[-40:]:   # cap at last 40 to avoid huge prompts
+            transcript_parts.append(f"{msg.role.upper()}: {msg.content[:500]}")
+        transcript = "\n".join(transcript_parts)
+
+        summarize_prompt = (
+            "You are an expert technical assistant. "
+            "Produce a concise but complete summary (max 400 words) of the "
+            "developer conversation below. Cover: goal, files touched, decisions made, "
+            "open questions, and next suggested steps. This summary will be used as "
+            "context for a fresh chat session.\n\n"
+            + transcript
+        )
+
+        try:
+            summary_text = await self.model_router.generate_response(
+                prompt=summarize_prompt,
+                max_tokens=600,
+            )
+        except Exception as exc:
+            logger.warning(f"LLM summarisation failed, using fallback: {exc}")
+            summary_text = (
+                f"Continuing from previous session ({message_count} messages). "
+                "The conversation covered code changes in this repository."
+            )
+
+        # Create a new session seeded with the summary as a system message
+        new_session_id = self.session_manager.create_session(session.context)
+        from app.interactive.contracts import ChatMessage as _CM
+        system_seed = _CM(
+            role="system",
+            content=f"[Continuation context from previous thread]\n{summary_text}",
+        )
+        self.session_manager.add_message(new_session_id, system_seed)
+
+        logger.info(
+            f"Thread handoff: old={request.session_id} ({message_count} msgs) → "
+            f"new={new_session_id}"
+        )
+
+        return SessionSummaryResponse(
+            old_session_id=request.session_id,
+            new_session_id=new_session_id,
+            summary=summary_text,
+            message_count_was=message_count,
+        )
+
+    # ------------------------------------------------------------------
+    # Rollback: git-revert the last applied commit (local only, no push)
+    # ------------------------------------------------------------------
+    async def handle_rollback(self, request: RollbackRequest) -> RollbackResponse:
+        """
+        Revert the last committed change using ``git revert --no-edit``.
+        The revert is committed locally; it is never pushed automatically.
+        """
+        last = self.session_manager.get_last_execution(request.session_id)
+        if not last:
+            return RollbackResponse(
+                session_id=request.session_id,
+                success=False,
+                message="No previous execution found for this session — nothing to roll back.",
+            )
+
+        commit_sha = last.commit_sha
+        if not commit_sha:
+            return RollbackResponse(
+                session_id=request.session_id,
+                success=False,
+                message="Previous execution did not produce a commit SHA — cannot roll back.",
+            )
+
+        repo_path = getattr(self.engine, "repo_path", None)
+        try:
+            result = subprocess.run(
+                ["git", "revert", "--no-edit", commit_sha],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                logger.info(
+                    f"Rollback succeeded for session {request.session_id}: "
+                    f"reverted {commit_sha[:8]}"
+                )
+                # Clear the stored execution so double-rollback is blocked
+                self.session_manager.set_last_execution(
+                    request.session_id,
+                    ExecutionResultCard(
+                        status="Working", mode="CRITICAL",
+                        error=None, commit_sha=None
+                    ),
+                )
+                return RollbackResponse(
+                    session_id=request.session_id,
+                    success=True,
+                    message=f"✓ Rolled back commit {commit_sha[:8]} successfully (local revert commit created).",
+                    commit_reverted=commit_sha,
+                )
+            else:
+                err = result.stderr.strip() or result.stdout.strip()
+                logger.error(f"git revert failed for session {request.session_id}: {err}")
+                return RollbackResponse(
+                    session_id=request.session_id,
+                    success=False,
+                    message=f"✗ git revert failed: {err}",
+                    commit_reverted=commit_sha,
+                )
+        except Exception as exc:
+            logger.error(f"Rollback exception for session {request.session_id}: {exc}", exc_info=True)
+            return RollbackResponse(
+                session_id=request.session_id,
+                success=False,
+                message=f"✗ Rollback error: {str(exc)}",
             )
 
 

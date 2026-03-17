@@ -97,6 +97,12 @@ export class ChatPanel {
             case 'getSuggestions':
                 await this.handleGetSuggestions(message.currentInput, message.context);
                 break;
+            case 'newThread':
+                await this.handleNewThread();
+                break;
+            case 'rollbackChange':
+                await this.handleRollback();
+                break;
         }
     }
 
@@ -150,12 +156,31 @@ export class ChatPanel {
     }
 
     /**
-     * Get current editor context.
+     * Get current editor context, including VS Code diagnostics (errors/warnings).
      */
     private getCurrentContext(): any {
         const editor = vscode.window.activeTextEditor;
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+        // Gather diagnostics from all open files (first 20 errors/warnings)
+        const diagnostics: string[] = [];
+        vscode.languages.getDiagnostics().forEach(([uri, diags]) => {
+            diags
+                .filter(d => d.severity <= vscode.DiagnosticSeverity.Warning)
+                .slice(0, 5)
+                .forEach(d => {
+                    const rel = vscode.workspace.asRelativePath(uri);
+                    const line = d.range.start.line + 1;
+                    const sev = d.severity === vscode.DiagnosticSeverity.Error ? 'ERROR' : 'WARN';
+                    diagnostics.push(`[${sev}] ${rel}:${line} — ${d.message}`);
+                });
+        });
+
         if (!editor) {
-            return null;
+            return {
+                workspace_path: workspacePath,
+                diagnostics: diagnostics.slice(0, 20)
+            };
         }
 
         const document = editor.document;
@@ -168,8 +193,9 @@ export class ChatPanel {
             selected_code: selectedText || null,
             selection_start_line: selection.start.line + 1,
             selection_end_line: selection.end.line + 1,
-            workspace_path: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
-            language: document.languageId
+            workspace_path: workspacePath,
+            language: document.languageId,
+            diagnostics: diagnostics.slice(0, 20)
         };
     }
 
@@ -230,10 +256,11 @@ export class ChatPanel {
             // Show success message
             vscode.window.showInformationMessage('Changes applied successfully!');
 
-            // Add execution result to chat
+            // Add execution result card to chat
             this.panel?.webview.postMessage({
-                type: 'assistantMessage',
-                message: response.message
+                type: 'executionResult',
+                message: response.message,
+                executionResult: response.execution_result || null
             });
 
         } catch (error: any) {
@@ -315,18 +342,94 @@ export class ChatPanel {
                         font-weight: 600;
                     }
 
-                    #clearBtn {
-                        background: var(--vscode-button-background);
-                        color: var(--vscode-button-foreground);
+                    #headerActions {
+                        display: flex;
+                        gap: 6px;
+                        align-items: center;
+                    }
+
+                    #clearBtn, #newThreadBtn {
+                        background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
+                        color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
                         border: none;
-                        padding: 4px 12px;
+                        padding: 4px 10px;
                         cursor: pointer;
-                        font-size: 12px;
+                        font-size: 11px;
                         border-radius: 2px;
                     }
 
-                    #clearBtn:hover {
-                        background: var(--vscode-button-hoverBackground);
+                    #clearBtn:hover, #newThreadBtn:hover {
+                        opacity: 0.85;
+                    }
+
+                    /* ── Execution result card ── */
+                    .exec-result-card {
+                        margin-top: 8px;
+                        padding: 10px 12px;
+                        background: var(--vscode-textBlockQuote-background);
+                        border: 1px solid var(--vscode-textBlockQuote-border);
+                        border-radius: 4px;
+                        font-size: 12px;
+                    }
+                    .exec-result-card .exec-title {
+                        font-weight: 700;
+                        margin-bottom: 6px;
+                    }
+                    .exec-result-card .exec-row {
+                        display: flex;
+                        gap: 12px;
+                        flex-wrap: wrap;
+                        margin-bottom: 4px;
+                        opacity: 0.9;
+                    }
+                    .exec-result-card .exec-badge {
+                        padding: 1px 7px;
+                        border-radius: 8px;
+                        font-size: 11px;
+                        font-weight: 600;
+                    }
+                    .exec-badge.ok   { background: rgba(0,200,80,0.18); color: #4ec94e; }
+                    .exec-badge.fail { background: rgba(255,80,80,0.18); color: #f48771; }
+                    .exec-badge.sha  { background: rgba(100,100,255,0.15); color: var(--vscode-textLink-foreground); font-family: monospace; }
+                    .exec-result-card .exec-steps {
+                        margin-top: 6px;
+                        padding-left: 16px;
+                        opacity: 0.85;
+                        font-size: 11px;
+                    }
+                    .exec-result-card .exec-actions {
+                        margin-top: 8px;
+                        display: flex;
+                        gap: 8px;
+                        flex-wrap: wrap;
+                    }
+                    .exec-result-card .exec-btn {
+                        padding: 4px 10px;
+                        border: none;
+                        border-radius: 2px;
+                        cursor: pointer;
+                        font-size: 11px;
+                    }
+                    .exec-btn.undo   { background: #7a2d00; color: #fff; }
+                    .exec-btn.undo:hover { opacity: 0.85; }
+                    .exec-btn.copy   { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+
+                    /* ── Thread-switch banner ── */
+                    .thread-banner {
+                        padding: 10px 14px;
+                        background: rgba(100,130,255,0.12);
+                        border: 1px solid rgba(100,130,255,0.4);
+                        border-radius: 4px;
+                        font-size: 12px;
+                        align-self: stretch;
+                    }
+                    .thread-banner strong { display: block; margin-bottom: 4px; }
+
+                    /* ── Slash command hint in placeholder ── */
+                    #slashHint {
+                        font-size: 10px;
+                        opacity: 0.55;
+                        padding: 0 16px 4px;
                     }
 
                     #messages {
@@ -598,18 +701,22 @@ export class ChatPanel {
             <body>
                 <div id="header">
                     <h1>Agent NEO Chat</h1>
-                    <button id="clearBtn">Clear Session</button>
+                    <div id="headerActions">
+                        <button id="newThreadBtn" title="Summarise this thread and start fresh">🔄 New Thread</button>
+                        <button id="clearBtn">Clear Session</button>
+                    </div>
                 </div>
 
                 <div id="messages"></div>
 
                 <div id="suggestionsContainer"></div>
                 <div id="attachmentPreview"></div>
+                <div id="slashHint">💡 Slash commands: /plan &nbsp;/fix &nbsp;/verify &nbsp;/rollback &nbsp;/help</div>
 
                 <div id="inputArea">
                     <button id="attachBtn" title="Attach image or PDF">📎</button>
                     <input type="file" id="fileInput" accept="image/*,.pdf" style="display:none">
-                    <textarea id="messageInput" placeholder="Ask Agent NEO anything..." rows="1"></textarea>
+                    <textarea id="messageInput" placeholder="Ask Agent NEO anything... (or use /commands)" rows="1"></textarea>
                     <button id="sendBtn">Send</button>
                 </div>
 
@@ -619,12 +726,15 @@ export class ChatPanel {
                     const messageInput = document.getElementById('messageInput');
                     const sendBtn = document.getElementById('sendBtn');
                     const clearBtn = document.getElementById('clearBtn');
+                    const newThreadBtn = document.getElementById('newThreadBtn');
                     const attachBtn = document.getElementById('attachBtn');
                     const fileInput = document.getElementById('fileInput');
                     const suggestionsContainer = document.getElementById('suggestionsContainer');
                     const attachmentPreview = document.getElementById('attachmentPreview');
 
                     let isLoading = false;
+                    let messageCount = 0;           // track thread length
+                    const NEW_THREAD_THRESHOLD = 20; // suggest new thread after N messages
                     // SLICE 6 — pending attachments accumulate until message is sent
                     let pendingAttachmentIds = [];
                     // SLICE 8 — typing debounce timer
@@ -654,6 +764,9 @@ export class ChatPanel {
 
                     sendBtn.addEventListener('click', sendMessage);
                     clearBtn.addEventListener('click', clearSession);
+                    newThreadBtn.addEventListener('click', () => {
+                        vscode.postMessage({ type: 'newThread' });
+                    });
 
                     // ── SLICE 6 — attach button ──
                     attachBtn.addEventListener('click', () => fileInput.click());
@@ -681,6 +794,35 @@ export class ChatPanel {
                         reader.readAsDataURL(file);
                     });
 
+                    // Slash command dispatch — runs BEFORE sending to backend
+                    function handleSlashCommand(cmd) {
+                        const lower = cmd.toLowerCase().trim();
+                        if (lower === '/rollback' || lower === '/undo') {
+                            vscode.postMessage({ type: 'rollbackChange' });
+                            return true;
+                        }
+                        if (lower === '/newthread' || lower === '/new') {
+                            vscode.postMessage({ type: 'newThread' });
+                            return true;
+                        }
+                        if (lower === '/help') {
+                            addMessage('assistant',
+                                'Available slash commands:\\n' +
+                                '/plan    — ask Agent NEO to plan changes before applying\\n' +
+                                '/fix     — attempt to auto-fix failing tests\\n' +
+                                '/verify  — re-run tests and report status\\n' +
+                                '/rollback or /undo — revert last applied commit (local only)\\n' +
+                                '/newthread or /new  — summarise thread and continue in fresh session'
+                            );
+                            return true;
+                        }
+                        // /plan, /fix, /verify → pass through to LLM with added intent hint
+                        if (['/plan', '/fix', '/verify'].includes(lower)) {
+                            return false; // let LLM handle it
+                        }
+                        return false;
+                    }
+
                     function sendMessage() {
                         const message = messageInput.value.trim();
                         if (!message || isLoading) return;
@@ -690,10 +832,28 @@ export class ChatPanel {
                         messageInput.style.height = 'auto';
                         clearSuggestions();
 
+                        // Intercept slash commands before sending to backend
+                        if (message.startsWith('/')) {
+                            const handled = handleSlashCommand(message);
+                            if (handled) return;
+                            // Unrecognised slash command — pass through so LLM can respond
+                        }
+
                         // Capture and reset pending attachments
                         const attachmentIds = [...pendingAttachmentIds];
                         pendingAttachmentIds = [];
                         attachmentPreview.innerHTML = '';
+
+                        messageCount++;
+
+                        // Nudge toward new thread when threshold is hit
+                        if (messageCount === NEW_THREAD_THRESHOLD) {
+                            addMessage('assistant',
+                                '💡 This thread is getting long (' + messageCount + ' messages). ' +
+                                'Click **🔄 New Thread** in the header to summarise and continue fresh, ' +
+                                'or keep going here.'
+                            );
+                        }
 
                         // Send to extension
                         vscode.postMessage({
@@ -751,6 +911,101 @@ export class ChatPanel {
                             chip.remove();
                         };
                         attachmentPreview.appendChild(chip);
+                    }
+
+                    // ── Execution result card renderer ──────────────────────────────
+                    function createExecResultCard(result) {
+                        const card = document.createElement('div');
+                        card.className = 'exec-result-card';
+
+                        const title = document.createElement('div');
+                        title.className = 'exec-title';
+                        const icon = result.status === 'Working' ? '✅' : '❌';
+                        title.textContent = icon + ' Execution Result';
+                        card.appendChild(title);
+
+                        // Badge row
+                        const row = document.createElement('div');
+                        row.className = 'exec-row';
+
+                        function badge(text, cls) {
+                            const b = document.createElement('span');
+                            b.className = 'exec-badge ' + cls;
+                            b.textContent = text;
+                            return b;
+                        }
+
+                        row.appendChild(badge(result.status || '—', result.status === 'Working' ? 'ok' : 'fail'));
+                        row.appendChild(badge(result.mode || 'CRITICAL', 'ok'));
+                        if (result.commit_sha) {
+                            row.appendChild(badge(result.commit_sha.slice(0, 8), 'sha'));
+                        }
+                        if (result.pushed) {
+                            row.appendChild(badge('Pushed ✓', 'ok'));
+                        }
+                        if (result.pre_test_passed !== null && result.pre_test_passed !== undefined) {
+                            row.appendChild(badge('Pre-tests: ' + (result.pre_test_passed ? '✓' : '✗'), result.pre_test_passed ? 'ok' : 'fail'));
+                        }
+                        if (result.post_test_passed !== null && result.post_test_passed !== undefined) {
+                            row.appendChild(badge('Post-tests: ' + (result.post_test_passed ? '✓' : '✗'), result.post_test_passed ? 'ok' : 'fail'));
+                        }
+                        card.appendChild(row);
+
+                        // Files changed
+                        if (result.files_changed && result.files_changed.length > 0) {
+                            const files = document.createElement('div');
+                            files.style.fontSize = '11px';
+                            files.style.opacity = '0.8';
+                            files.style.marginTop = '4px';
+                            files.textContent = 'Files: ' + result.files_changed.join(', ');
+                            card.appendChild(files);
+                        }
+
+                        // Verify steps
+                        if (result.verify_steps && result.verify_steps.length > 0) {
+                            const steps = document.createElement('ul');
+                            steps.className = 'exec-steps';
+                            result.verify_steps.forEach(s => {
+                                const li = document.createElement('li');
+                                li.textContent = s;
+                                steps.appendChild(li);
+                            });
+                            card.appendChild(steps);
+                        }
+
+                        // Error
+                        if (result.error) {
+                            const err = document.createElement('div');
+                            err.style.color = 'var(--vscode-errorForeground)';
+                            err.style.marginTop = '4px';
+                            err.style.fontSize = '11px';
+                            err.textContent = '⚠️ ' + result.error;
+                            card.appendChild(err);
+                        }
+
+                        // Action buttons
+                        const actions = document.createElement('div');
+                        actions.className = 'exec-actions';
+
+                        if (result.commit_sha) {
+                            const undoBtn = document.createElement('button');
+                            undoBtn.className = 'exec-btn undo';
+                            undoBtn.textContent = '↩ Undo Last Change';
+                            undoBtn.title = 'Run git revert locally (no push)';
+                            undoBtn.onclick = () => vscode.postMessage({ type: 'rollbackChange' });
+                            actions.appendChild(undoBtn);
+                        }
+
+                        if (result.rollback_command) {
+                            const copyBtn = document.createElement('button');
+                            copyBtn.className = 'exec-btn copy';
+                            copyBtn.textContent = '📋 Copy Rollback Cmd';
+                            copyBtn.onclick = () => navigator.clipboard.writeText(result.rollback_command);
+                            actions.appendChild(copyBtn);
+                        }
+
+                        card.appendChild(actions);
+                        return card;
                     }
 
                     function addMessage(role, content, diffProposal = null) {
@@ -876,6 +1131,7 @@ export class ChatPanel {
                         switch (message.type) {
                             case 'userMessage':
                                 addMessage('user', message.message);
+                                messageCount++;
                                 break;
 
                             case 'assistantMessage':
@@ -883,6 +1139,43 @@ export class ChatPanel {
                                 isLoading = false;
                                 sendBtn.disabled = false;
                                 break;
+
+                            // Wave 2: typed execution result card
+                            case 'executionResult': {
+                                const msgDiv = document.createElement('div');
+                                msgDiv.className = 'message assistant';
+                                const hdr = document.createElement('div');
+                                hdr.className = 'message-header';
+                                hdr.textContent = 'Agent NEO';
+                                const txt = document.createElement('div');
+                                txt.className = 'message-content';
+                                txt.textContent = message.message || '✓ Done';
+                                msgDiv.appendChild(hdr);
+                                msgDiv.appendChild(txt);
+                                if (message.executionResult) {
+                                    msgDiv.appendChild(createExecResultCard(message.executionResult));
+                                }
+                                messagesDiv.appendChild(msgDiv);
+                                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                                isLoading = false;
+                                sendBtn.disabled = false;
+                                break;
+                            }
+
+                            // Wave 2: thread switched
+                            case 'threadSwitched': {
+                                messagesDiv.innerHTML = '';
+                                messageCount = 0;
+                                const banner = document.createElement('div');
+                                banner.className = 'thread-banner';
+                                banner.innerHTML =
+                                    '<strong>🔄 New thread started</strong>' +
+                                    'Previous conversation (' + message.messageCountWas + ' messages) has been summarised:<br><br>' +
+                                    '<em>' + (message.summary || '').slice(0, 400) + '</em>';
+                                messagesDiv.appendChild(banner);
+                                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                                break;
+                            }
 
                             case 'error':
                                 addMessage('error', 'Error: ' + message.message);
@@ -897,12 +1190,15 @@ export class ChatPanel {
 
                             case 'sessionCleared':
                                 messagesDiv.innerHTML = '';
+                                messageCount = 0;
                                 break;
 
                             case 'loadHistory':
                                 messagesDiv.innerHTML = '';
+                                messageCount = 0;
                                 message.messages.forEach(msg => {
                                     addMessage(msg.role, msg.content);
+                                    messageCount++;
                                 });
                                 break;
 
@@ -928,6 +1224,71 @@ export class ChatPanel {
             </body>
             </html>
         `;
+    }
+
+    /**
+     * Handle "Continue in New Thread" — summarise + switch session.
+     */
+    private async handleNewThread() {
+        if (!this.sessionId) { return; }
+        try {
+            this.panel?.webview.postMessage({ type: 'loading', loading: true });
+            const result = await this.apiClient.summarizeSession(this.sessionId);
+
+            // Switch the active session
+            const oldId = this.sessionId;
+            this.sessionId = result.new_session_id;
+
+            vscode.window.showInformationMessage(
+                `New thread started (${result.message_count_was} messages summarised).`
+            );
+            this.panel?.webview.postMessage({
+                type: 'threadSwitched',
+                newSessionId: result.new_session_id,
+                summary: result.summary,
+                messageCountWas: result.message_count_was,
+                oldSessionId: oldId,
+            });
+        } catch (error: any) {
+            vscode.window.showErrorMessage(`Failed to start new thread: ${error.message}`);
+            this.panel?.webview.postMessage({
+                type: 'error',
+                message: `Failed to start new thread: ${error.message}`
+            });
+        } finally {
+            this.panel?.webview.postMessage({ type: 'loading', loading: false });
+        }
+    }
+
+    /**
+     * Handle "Undo Last Change" rollback request.
+     */
+    private async handleRollback() {
+        if (!this.sessionId) { return; }
+        const confirm = await vscode.window.showWarningMessage(
+            'This will run git revert on the last applied commit (local only, no push). Continue?',
+            'Yes, roll back', 'Cancel'
+        );
+        if (confirm !== 'Yes, roll back') { return; }
+
+        try {
+            this.panel?.webview.postMessage({ type: 'loading', loading: true });
+            const result = await this.apiClient.rollbackLastChange(this.sessionId);
+            const icon = result.success ? '✓' : '✗';
+            vscode.window.showInformationMessage(`${icon} ${result.message}`);
+            this.panel?.webview.postMessage({
+                type: 'assistantMessage',
+                message: `${icon} **Rollback**: ${result.message}`
+            });
+        } catch (error: any) {
+            vscode.window.showErrorMessage(`Rollback failed: ${error.message}`);
+            this.panel?.webview.postMessage({
+                type: 'error',
+                message: `Rollback failed: ${error.message}`
+            });
+        } finally {
+            this.panel?.webview.postMessage({ type: 'loading', loading: false });
+        }
     }
 
     /**

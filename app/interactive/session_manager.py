@@ -7,7 +7,7 @@ import uuid
 from typing import Dict, Optional
 from datetime import datetime
 
-from app.interactive.contracts import ChatSession, ChatMessage, ChatContext
+from app.interactive.contracts import ChatSession, ChatMessage, ChatContext, ExecutionResultCard
 
 
 class SessionManager:
@@ -123,6 +123,39 @@ class SessionManager:
         session.updated_at = datetime.utcnow()
         return True
     
+    def set_last_execution(self, session_id: str, result: ExecutionResultCard) -> bool:
+        """
+        Persist the most-recent execution result (used by rollback).
+
+        Args:
+            session_id: Session ID
+            result: Typed execution result card
+
+        Returns:
+            True if successful, False if session not found
+        """
+        session = self.get_session(session_id)
+        if not session:
+            return False
+        session.last_execution = result
+        session.updated_at = datetime.utcnow()
+        return True
+
+    def get_last_execution(self, session_id: str) -> "ExecutionResultCard | None":
+        """
+        Retrieve the most-recent execution result for rollback.
+
+        Args:
+            session_id: Session ID
+
+        Returns:
+            ExecutionResultCard or None
+        """
+        session = self.get_session(session_id)
+        if not session:
+            return None
+        return session.last_execution
+
     def delete_session(self, session_id: str) -> bool:
         """
         Delete a session.

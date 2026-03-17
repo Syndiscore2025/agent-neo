@@ -4,7 +4,7 @@ Tests for interactive session manager.
 
 import pytest
 from app.interactive.session_manager import SessionManager, get_session_manager
-from app.interactive.contracts import ChatMessage, ChatContext
+from app.interactive.contracts import ChatMessage, ChatContext, ExecutionResultCard
 
 
 class TestSessionManager:
@@ -123,6 +123,65 @@ class TestSessionManager:
         """Test global session manager singleton."""
         manager1 = get_session_manager()
         manager2 = get_session_manager()
-        
+
         assert manager1 is manager2
+
+    # ------------------------------------------------------------------
+    # Wave 2 — last_execution persistence
+    # ------------------------------------------------------------------
+    def test_set_and_get_last_execution(self):
+        """Test storing and retrieving the last execution result card."""
+        manager = SessionManager()
+        session_id = manager.create_session()
+
+        card = ExecutionResultCard(
+            status="Working",
+            mode="CRITICAL",
+            commit_sha="abc12345",
+            files_changed=["app/main.py"],
+        )
+        result = manager.set_last_execution(session_id, card)
+        assert result is True
+
+        retrieved = manager.get_last_execution(session_id)
+        assert retrieved is not None
+        assert retrieved.commit_sha == "abc12345"
+        assert retrieved.status == "Working"
+        assert "app/main.py" in retrieved.files_changed
+
+    def test_get_last_execution_no_execution(self):
+        """Test get_last_execution returns None when nothing has been stored."""
+        manager = SessionManager()
+        session_id = manager.create_session()
+
+        result = manager.get_last_execution(session_id)
+        assert result is None
+
+    def test_set_last_execution_invalid_session(self):
+        """Test set_last_execution returns False for unknown session."""
+        manager = SessionManager()
+        card = ExecutionResultCard(status="Working", mode="CRITICAL")
+        result = manager.set_last_execution("nonexistent-session", card)
+        assert result is False
+
+    def test_get_last_execution_invalid_session(self):
+        """Test get_last_execution returns None for unknown session."""
+        manager = SessionManager()
+        result = manager.get_last_execution("nonexistent-session")
+        assert result is None
+
+    def test_set_last_execution_overwrites_previous(self):
+        """Test that set_last_execution replaces the previous value."""
+        manager = SessionManager()
+        session_id = manager.create_session()
+
+        card1 = ExecutionResultCard(status="Working", mode="CRITICAL", commit_sha="first-sha")
+        card2 = ExecutionResultCard(status="Broken", mode="CRITICAL", commit_sha="second-sha")
+
+        manager.set_last_execution(session_id, card1)
+        manager.set_last_execution(session_id, card2)
+
+        retrieved = manager.get_last_execution(session_id)
+        assert retrieved.commit_sha == "second-sha"
+        assert retrieved.status == "Broken"
 
