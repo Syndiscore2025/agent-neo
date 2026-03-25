@@ -103,6 +103,9 @@ export class ChatPanel {
             case 'rollbackChange':
                 await this.handleRollback();
                 break;
+            case 'autoRun':
+                await this.handleAutoRun(message.task);
+                break;
         }
     }
 
@@ -615,8 +618,8 @@ export class ChatPanel {
                         cursor: not-allowed;
                     }
 
-                    /* ── Attach button ── */
-                    #attachBtn {
+                    /* ── Attach + Mic buttons ── */
+                    #attachBtn, #micBtn {
                         background: var(--vscode-button-secondaryBackground, var(--vscode-input-background));
                         color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
                         border: 1px solid var(--vscode-input-border);
@@ -626,7 +629,49 @@ export class ChatPanel {
                         border-radius: 2px;
                         line-height: 1;
                     }
-                    #attachBtn:hover { opacity: 0.8; }
+                    #attachBtn:hover, #micBtn:hover { opacity: 0.8; }
+
+                    /* ── AutoRun result card ── */
+                    .auto-run-card {
+                        background: var(--vscode-input-background);
+                        border: 1px solid var(--vscode-input-border);
+                        border-radius: 6px;
+                        padding: 10px 14px;
+                        margin-top: 6px;
+                        font-size: 12px;
+                    }
+                    .auto-run-header {
+                        font-size: 13px;
+                        margin-bottom: 8px;
+                    }
+                    .auto-run-steps {
+                        display: flex;
+                        flex-direction: column;
+                        gap: 6px;
+                        margin-bottom: 8px;
+                    }
+                    .auto-run-step {
+                        padding: 4px 8px;
+                        border-radius: 4px;
+                        background: var(--vscode-editor-inactiveSelectionBackground);
+                        line-height: 1.5;
+                    }
+                    .auto-run-step.step-success { border-left: 3px solid #4ec94e; }
+                    .auto-run-step.step-failed  { border-left: 3px solid #e05252; }
+                    .auto-run-step.step-skipped { border-left: 3px solid #888; opacity: 0.7; }
+                    .step-ms { opacity: 0.55; font-size: 10px; }
+                    .step-msg { opacity: 0.85; white-space: pre-wrap; }
+                    .auto-run-summary {
+                        font-style: italic;
+                        opacity: 0.8;
+                        margin-top: 4px;
+                    }
+                    .auto-run-commit {
+                        margin-top: 4px;
+                        font-family: monospace;
+                        font-size: 11px;
+                        opacity: 0.7;
+                    }
 
                     /* ── Pending attachment chips (in input area) ── */
                     #attachmentPreview {
@@ -711,11 +756,12 @@ export class ChatPanel {
 
                 <div id="suggestionsContainer"></div>
                 <div id="attachmentPreview"></div>
-                <div id="slashHint">💡 Slash commands: /plan &nbsp;/fix &nbsp;/verify &nbsp;/rollback &nbsp;/help</div>
+                <div id="slashHint">💡 Slash commands: /plan &nbsp;/fix &nbsp;/verify &nbsp;/rollback &nbsp;/run &lt;task&gt; &nbsp;/help</div>
 
                 <div id="inputArea">
                     <button id="attachBtn" title="Attach image or PDF">📎</button>
                     <input type="file" id="fileInput" accept="image/*,.pdf" style="display:none">
+                    <button id="micBtn" title="Speak your message (Speech-to-Text)">🎤</button>
                     <textarea id="messageInput" placeholder="Ask Agent NEO anything... (or use /commands)" rows="1"></textarea>
                     <button id="sendBtn">Send</button>
                 </div>
@@ -729,6 +775,7 @@ export class ChatPanel {
                     const newThreadBtn = document.getElementById('newThreadBtn');
                     const attachBtn = document.getElementById('attachBtn');
                     const fileInput = document.getElementById('fileInput');
+                    const micBtn = document.getElementById('micBtn');
                     const suggestionsContainer = document.getElementById('suggestionsContainer');
                     const attachmentPreview = document.getElementById('attachmentPreview');
 
@@ -794,6 +841,54 @@ export class ChatPanel {
                         reader.readAsDataURL(file);
                     });
 
+                    // ── Speech-to-Text via Web Speech API ──────────────────────────────
+                    let sttRecognition = null;
+                    let sttActive = false;
+                    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+                        const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+                        sttRecognition = new SpeechRecognitionCtor();
+                        sttRecognition.continuous = false;
+                        sttRecognition.interimResults = true;
+                        sttRecognition.lang = 'en-US';
+
+                        sttRecognition.onstart = () => {
+                            sttActive = true;
+                            micBtn.textContent = '🔴';
+                            micBtn.title = 'Recording… click to stop';
+                        };
+                        sttRecognition.onresult = (event) => {
+                            let transcript = '';
+                            for (let i = event.resultIndex; i < event.results.length; i++) {
+                                transcript += event.results[i][0].transcript;
+                            }
+                            messageInput.value = transcript;
+                            messageInput.style.height = 'auto';
+                            messageInput.style.height = messageInput.scrollHeight + 'px';
+                        };
+                        sttRecognition.onend = () => {
+                            sttActive = false;
+                            micBtn.textContent = '🎤';
+                            micBtn.title = 'Speak your message (Speech-to-Text)';
+                        };
+                        sttRecognition.onerror = (event) => {
+                            console.error('STT error', event.error);
+                            sttActive = false;
+                            micBtn.textContent = '🎤';
+                        };
+
+                        micBtn.addEventListener('click', () => {
+                            if (sttActive) {
+                                sttRecognition.stop();
+                            } else {
+                                messageInput.value = '';
+                                sttRecognition.start();
+                            }
+                        });
+                    } else {
+                        // Browser doesn't support STT — hide the button
+                        micBtn.style.display = 'none';
+                    }
+
                     // Slash command dispatch — runs BEFORE sending to backend
                     function handleSlashCommand(cmd) {
                         const lower = cmd.toLowerCase().trim();
@@ -812,9 +907,18 @@ export class ChatPanel {
                                 '/fix     — attempt to auto-fix failing tests\\n' +
                                 '/verify  — re-run tests and report status\\n' +
                                 '/rollback or /undo — revert last applied commit (local only)\\n' +
-                                '/newthread or /new  — summarise thread and continue in fresh session'
+                                '/newthread or /new  — summarise thread and continue in fresh session\\n' +
+                                '/run <task>         — run a task fully autonomously (no mid-step approvals)'
                             );
                             return true;
+                        }
+                        // /run <task> → autonomous task runner
+                        if (lower.startsWith('/run ')) {
+                            const task = cmd.slice(5).trim();
+                            if (task) {
+                                vscode.postMessage({ type: 'autoRun', task });
+                                return true;
+                            }
                         }
                         // /plan, /fix, /verify → pass through to LLM with added intent hint
                         if (['/plan', '/fix', '/verify'].includes(lower)) {
@@ -1124,6 +1228,15 @@ export class ChatPanel {
                         messagesDiv.scrollTop = messagesDiv.scrollHeight;
                     }
 
+                    function escapeHtml(str) {
+                        if (!str) { return ''; }
+                        return String(str)
+                            .replace(/&/g, '&amp;')
+                            .replace(/</g, '&lt;')
+                            .replace(/>/g, '&gt;')
+                            .replace(/"/g, '&quot;');
+                    }
+
                     // Handle messages from extension
                     window.addEventListener('message', event => {
                         const message = event.data;
@@ -1215,6 +1328,37 @@ export class ChatPanel {
                             case 'suggestions':
                                 renderSuggestions(message.suggestions || []);
                                 break;
+
+                            // Autonomous task runner result card
+                            case 'autoRunResult': {
+                                const iconMap = { success: '✅', failed: '❌', skipped: '⏭️' };
+                                const statusIcon = message.overallStatus === 'success' ? '✅' : '❌';
+                                let html = '<div class="auto-run-card">';
+                                html += '<div class="auto-run-header">';
+                                html += statusIcon + ' <strong>AutoRun:</strong> ' + escapeHtml(message.task);
+                                html += '</div>';
+                                html += '<div class="auto-run-steps">';
+                                (message.steps || []).forEach(step => {
+                                    const icon = iconMap[step.status] || '⬜';
+                                    const ms = step.duration_ms ? ' <span class="step-ms">(' + step.duration_ms + 'ms)</span>' : '';
+                                    html += '<div class="auto-run-step step-' + step.status + '">';
+                                    html += icon + ' <strong>' + step.step_name.toUpperCase() + '</strong>' + ms + '<br>';
+                                    html += '<span class="step-msg">' + escapeHtml(step.message) + '</span>';
+                                    html += '</div>';
+                                });
+                                html += '</div>';
+                                html += '<div class="auto-run-summary">' + escapeHtml(message.summary) + '</div>';
+                                if (message.executionResult && message.executionResult.commit_sha) {
+                                    html += '<div class="auto-run-commit">🔖 Commit: ' + message.executionResult.commit_sha.slice(0, 8) + '</div>';
+                                }
+                                html += '</div>';
+                                const wrapper = document.createElement('div');
+                                wrapper.className = 'message assistant';
+                                wrapper.innerHTML = html;
+                                messagesDiv.appendChild(wrapper);
+                                scrollToBottom();
+                                break;
+                            }
                         }
                     });
 
@@ -1338,6 +1482,47 @@ export class ChatPanel {
         } catch (error: any) {
             // Suggestions are non-critical — silently ignore failures
             console.debug('Suggestions request failed:', error.message);
+        }
+    }
+
+    /**
+     * Handle autonomous task run request from webview.
+     */
+    private async handleAutoRun(task: string) {
+        if (!task) { return; }
+        try {
+            this.panel?.webview.postMessage({ type: 'loading', loading: true });
+            // Show the user what we're running
+            this.panel?.webview.postMessage({
+                type: 'userMessage',
+                message: `/run ${task}`
+            });
+
+            const context = this.getCurrentContext();
+            const result = await this.apiClient.autoRun(task, this.sessionId, context);
+
+            // Update session ID if returned
+            if (result.session_id) {
+                this.sessionId = result.session_id;
+            }
+
+            // Send structured run result to webview renderer
+            this.panel?.webview.postMessage({
+                type: 'autoRunResult',
+                task: result.task,
+                steps: result.steps,
+                overallStatus: result.overall_status,
+                summary: result.summary,
+                executionResult: result.execution_result
+            });
+        } catch (error: any) {
+            console.error('AutoRun failed:', error);
+            this.panel?.webview.postMessage({
+                type: 'error',
+                message: `AutoRun failed: ${error.message}`
+            });
+        } finally {
+            this.panel?.webview.postMessage({ type: 'loading', loading: false });
         }
     }
 

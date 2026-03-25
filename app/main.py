@@ -40,6 +40,8 @@ from app.interactive.contracts import (
     SessionSummaryResponse,
     RollbackRequest,
     RollbackResponse,
+    AutoRunRequest,
+    AutoRunResponse,
 )
 from app.interactive.orchestrator import get_orchestrator
 from app.interactive.session_manager import get_session_manager
@@ -619,6 +621,26 @@ async def rollback_last_change(
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error(f"Rollback failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/chat/autorun", response_model=AutoRunResponse)
+async def auto_run_task(
+    request: AutoRunRequest,
+    _: str = Depends(verify_bearer_token)
+):
+    """
+    Execute a coding task fully autonomously: plan → diff → apply → verify.
+
+    No intermediate approval prompts — the user triggers it once and the
+    orchestrator chains all steps, returning a structured step-by-step result.
+    """
+    try:
+        orchestrator = get_orchestrator(engine)
+        response = await orchestrator.handle_auto_run(request)
+        return response
+    except Exception as e:
+        logger.error(f"AutoRun failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

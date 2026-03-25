@@ -156,6 +156,22 @@ class ApiClient {
         return response.data;
     }
     /**
+     * Run a task fully autonomously (plan → diff → apply → verify).
+     * @param task        Natural-language description of what to do.
+     * @param sessionId   Optional existing session to continue.
+     * @param context     Optional editor context (currentFile, etc.).
+     * @param push        If true, push to remote after applying.
+     */
+    async autoRun(task, sessionId, context, push = false) {
+        const response = await this.client.post('/chat/autorun', {
+            task,
+            session_id: sessionId,
+            context,
+            push
+        });
+        return response.data;
+    }
+    /**
      * Check API health.
      */
     async checkHealth() {

@@ -189,3 +189,33 @@ class RollbackResponse(BaseModel):
     message: str
     commit_reverted: Optional[str] = None
 
+
+# ---------------------------------------------------------------------------
+# Autonomous task runner
+# ---------------------------------------------------------------------------
+class AutoRunStep(BaseModel):
+    """Single step in an autonomous run."""
+    step_name: str           # "plan" | "diff" | "apply" | "verify"
+    status: str              # "success" | "failed" | "skipped"
+    message: str
+    duration_ms: Optional[int] = None
+
+
+class AutoRunRequest(BaseModel):
+    """Request to execute a task fully autonomously (plan → diff → apply → verify)."""
+    session_id: Optional[str] = None
+    task: str = Field(..., min_length=1)
+    context: Optional[ChatContext] = None
+    push: bool = False       # If True, push to remote after applying
+
+
+class AutoRunResponse(BaseModel):
+    """Response from an autonomous task run."""
+    session_id: str
+    task: str
+    steps: List[AutoRunStep]
+    overall_status: str      # "success" | "failed" | "partial"
+    summary: str
+    execution_result: Optional[ExecutionResultCard] = None
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+

@@ -8,6 +8,7 @@ import subprocess
 from typing import Optional
 from datetime import datetime
 
+import time
 from app.interactive.contracts import (
     ChatRequest,
     ChatResponse,
@@ -20,6 +21,9 @@ from app.interactive.contracts import (
     SessionSummaryResponse,
     RollbackRequest,
     RollbackResponse,
+    AutoRunRequest,
+    AutoRunResponse,
+    AutoRunStep,
 )
 from app.interactive.session_manager import get_session_manager
 from app.interactive.model_router import get_model_router
@@ -542,6 +546,211 @@ class InteractiveOrchestrator:
                 success=False,
                 message=f"✗ Rollback error: {str(exc)}",
             )
+
+
+    # ------------------------------------------------------------------
+    # Autonomous task runner: plan → diff → apply → verify
+    # ------------------------------------------------------------------
+    async def handle_auto_run(self, request: AutoRunRequest) -> AutoRunResponse:
+        """
+        Execute a task fully autonomously without intermediate approval prompts.
+
+        Steps:
+          1. PLAN  — LLM produces a structured plan narrative
+          2. DIFF  — LLM generates a unified diff
+          3. APPLY — Engine executes the diff via CRITICAL mode
+          4. VERIFY — Inspect execution result (tests pass/fail)
+
+        The user is informed about each step via the returned AutoRunResponse
+        which the VS Code extension renders as a live step card.
+        """
+        # Resolve / create session
+        session_id = request.session_id
+        if not session_id:
+            session_id = self.session_manager.create_session(request.context)
+        session = self.session_manager.get_session(session_id)
+        if not session:
+            session_id = self.session_manager.create_session(request.context)
+            session = self.session_manager.get_session(session_id)
+
+        steps: list[AutoRunStep] = []
+        context = self.context_engine.gather_context(request.context)
+
+        # ── STEP 1: PLAN ────────────────────────────────────────────────
+        t0 = time.monotonic()
+        plan_prompt = (
+            "You are Agent NEO, an autonomous coding assistant.\n"
+            "The user has triggered an autonomous task run. "
+            "First, produce a concise bullet-point PLAN (max 150 words) of what you will do.\n"
+            "Do NOT write any code yet — only the plan.\n\n"
+            f"Task: {request.task}\n"
+        )
+        if context.get("current_file"):
+            plan_prompt += f"Current file: {context['current_file']}\n"
+        try:
+            plan_text = await self.model_router.generate_response(plan_prompt, max_tokens=400)
+            steps.append(AutoRunStep(
+                step_name="plan",
+                status="success",
+                message=plan_text,
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            ))
+            logger.info(f"AutoRun[{session_id}] PLAN done")
+        except Exception as exc:
+            steps.append(AutoRunStep(
+                step_name="plan", status="failed",
+                message=f"Planning failed: {exc}",
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            ))
+            return AutoRunResponse(
+                session_id=session_id, task=request.task, steps=steps,
+                overall_status="failed",
+                summary="Autonomous run stopped: planning step failed.",
+            )
+
+        # ── STEP 2: DIFF ────────────────────────────────────────────────
+        t0 = time.monotonic()
+        diff_prompt = self._build_enriched_prompt(
+            user_message=request.task,
+            context=context,
+            session=session,
+            intent="modify",
+        )
+        diff_prompt += (
+            "\n\nIMPORTANT: This is an AUTONOMOUS run. "
+            "Respond with ONLY the unified diff inside a ```diff block — no extra text."
+        )
+        try:
+            diff_response = await self.model_router.generate_response(diff_prompt, max_tokens=4000)
+            action_plan = self.action_planner.plan_action(
+                user_message=request.task,
+                model_response=diff_response,
+                context=context,
+            )
+            raw_diff = action_plan.get("diff")
+            if not raw_diff:
+                steps.append(AutoRunStep(
+                    step_name="diff", status="failed",
+                    message="Model did not produce a parseable diff.",
+                    duration_ms=int((time.monotonic() - t0) * 1000),
+                ))
+                return AutoRunResponse(
+                    session_id=session_id, task=request.task, steps=steps,
+                    overall_status="failed",
+                    summary="Autonomous run stopped: no diff could be extracted from the model response.",
+                )
+            steps.append(AutoRunStep(
+                step_name="diff", status="success",
+                message=f"Generated diff ({raw_diff.count(chr(10))} lines).",
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            ))
+            logger.info(f"AutoRun[{session_id}] DIFF done")
+        except Exception as exc:
+            steps.append(AutoRunStep(
+                step_name="diff", status="failed",
+                message=f"Diff generation failed: {exc}",
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            ))
+            return AutoRunResponse(
+                session_id=session_id, task=request.task, steps=steps,
+                overall_status="failed",
+                summary="Autonomous run stopped: diff generation failed.",
+            )
+
+        # ── STEP 3: APPLY ───────────────────────────────────────────────
+        t0 = time.monotonic()
+        try:
+            task_request = TaskRequest(
+                task_id=f"autorun-{session_id}-{int(datetime.utcnow().timestamp())}",
+                description=f"Autonomous run: {request.task}",
+                diff=raw_diff,
+                mode="CRITICAL",
+                force=request.push,
+            )
+            exec_result = self.engine.execute(task_request)
+            result_card = ExecutionResultCard(
+                status=exec_result.status,
+                mode=exec_result.mode,
+                commit_sha=exec_result.commit_sha,
+                files_changed=exec_result.files_changed,
+                lines_changed=exec_result.lines_changed,
+                pushed=exec_result.pushed,
+                verify_steps=exec_result.verify_steps or [],
+                rollback_command=exec_result.rollback_command,
+                pre_test_passed=(
+                    exec_result.pre_test_result.passed if exec_result.pre_test_result else None
+                ),
+                post_test_passed=(
+                    exec_result.post_test_result.passed if exec_result.post_test_result else None
+                ),
+                validation_passed=(
+                    exec_result.validation_result.passed if exec_result.validation_result else None
+                ),
+                error=exec_result.error,
+            )
+            self.session_manager.set_last_execution(session_id, result_card)
+            apply_ok = exec_result.status == "Working"
+            steps.append(AutoRunStep(
+                step_name="apply",
+                status="success" if apply_ok else "failed",
+                message=(
+                    f"Applied: {len(exec_result.files_changed)} file(s) changed, "
+                    f"commit {(exec_result.commit_sha or 'N/A')[:8]}."
+                    if apply_ok else f"Apply failed: {exec_result.error}"
+                ),
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            ))
+            logger.info(f"AutoRun[{session_id}] APPLY done — status={exec_result.status}")
+        except Exception as exc:
+            steps.append(AutoRunStep(
+                step_name="apply", status="failed",
+                message=f"Apply step raised an exception: {exc}",
+                duration_ms=int((time.monotonic() - t0) * 1000),
+            ))
+            return AutoRunResponse(
+                session_id=session_id, task=request.task, steps=steps,
+                overall_status="failed",
+                summary="Autonomous run stopped: apply step failed.",
+            )
+
+        # ── STEP 4: VERIFY ──────────────────────────────────────────────
+        t0 = time.monotonic()
+        post_ok = result_card.post_test_passed
+        verify_msg = (
+            "All post-apply tests passed ✓" if post_ok is True
+            else "Post-apply tests failed ✗" if post_ok is False
+            else "No test results available (tests may not be configured)."
+        )
+        steps.append(AutoRunStep(
+            step_name="verify",
+            status="success" if post_ok is not False else "failed",
+            message=verify_msg,
+            duration_ms=int((time.monotonic() - t0) * 1000),
+        ))
+
+        failed_steps = [s for s in steps if s.status == "failed"]
+        overall = "failed" if failed_steps else "success"
+        summary = (
+            f"✓ Task completed: {len(steps) - len(failed_steps)}/{len(steps)} steps succeeded. "
+            f"Commit: {(result_card.commit_sha or 'none')[:8]}."
+            if overall == "success"
+            else f"✗ Task finished with errors in: {', '.join(s.step_name for s in failed_steps)}."
+        )
+
+        # Record in session history
+        self.session_manager.add_message(session_id, ChatMessage(
+            role="assistant",
+            content=f"[AutoRun] {summary}",
+        ))
+
+        return AutoRunResponse(
+            session_id=session_id,
+            task=request.task,
+            steps=steps,
+            overall_status=overall,
+            summary=summary,
+            execution_result=result_card,
+        )
 
 
 # Global orchestrator instance
