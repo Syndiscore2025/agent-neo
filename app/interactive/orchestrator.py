@@ -4,6 +4,7 @@ Main orchestration logic for interactive chat workflow.
 """
 
 import logging
+import os
 import subprocess
 from typing import Optional
 from datetime import datetime
@@ -549,21 +550,19 @@ class InteractiveOrchestrator:
 
 
     # ------------------------------------------------------------------
-    # Autonomous task runner: plan → diff → apply → verify
+    # Autonomous task runner — Augment-style agentic ReAct loop
     # ------------------------------------------------------------------
     async def handle_auto_run(self, request: AutoRunRequest) -> AutoRunResponse:
         """
-        Execute a task fully autonomously without intermediate approval prompts.
+        Execute a task using a true tool-calling ReAct agent.
 
-        Steps:
-          1. PLAN  — LLM produces a structured plan narrative
-          2. DIFF  — LLM generates a unified diff
-          3. APPLY — Engine executes the diff via CRITICAL mode
-          4. VERIFY — Inspect execution result (tests pass/fail)
-
-        The user is informed about each step via the returned AutoRunResponse
-        which the VS Code extension renders as a live step card.
+        The agent can read/write files, run shell commands, and search the
+        codebase.  It loops autonomously until it calls `finish` or hits the
+        iteration cap.  Every file it writes is committed to git via CRITICAL
+        mode so the change is always reversible.
         """
+        from app.interactive.agent_loop import AgentLoop
+
         # Resolve / create session
         session_id = request.session_id
         if not session_id:
@@ -571,176 +570,39 @@ class InteractiveOrchestrator:
         session = self.session_manager.get_session(session_id)
         if not session:
             session_id = self.session_manager.create_session(request.context)
-            session = self.session_manager.get_session(session_id)
 
-        steps: list[AutoRunStep] = []
         context = self.context_engine.gather_context(request.context)
 
-        # ── STEP 1: PLAN ────────────────────────────────────────────────
-        t0 = time.monotonic()
-        plan_prompt = (
-            "You are Agent NEO, an autonomous coding assistant.\n"
-            "The user has triggered an autonomous task run. "
-            "First, produce a concise bullet-point PLAN (max 150 words) of what you will do.\n"
-            "Do NOT write any code yet — only the plan.\n\n"
-            f"Task: {request.task}\n"
-        )
-        if context.get("current_file"):
-            plan_prompt += f"Current file: {context['current_file']}\n"
+        repo_path = getattr(self.engine, "repo_path", None) or os.getenv("REPO_PATH", ".")
+
+        agent = AgentLoop(model_router=self.model_router, repo_path=repo_path)
+
+        t_start = time.monotonic()
         try:
-            plan_text = await self.model_router.generate_response(plan_prompt, max_tokens=400)
-            steps.append(AutoRunStep(
-                step_name="plan",
-                status="success",
-                message=plan_text,
-                duration_ms=int((time.monotonic() - t0) * 1000),
-            ))
-            logger.info(f"AutoRun[{session_id}] PLAN done")
+            result = await agent.run(task=request.task, context=context)
         except Exception as exc:
-            steps.append(AutoRunStep(
-                step_name="plan", status="failed",
-                message=f"Planning failed: {exc}",
-                duration_ms=int((time.monotonic() - t0) * 1000),
-            ))
+            logger.error(f"AgentLoop raised for session {session_id}: {exc}", exc_info=True)
             return AutoRunResponse(
-                session_id=session_id, task=request.task, steps=steps,
+                session_id=session_id, task=request.task,
+                steps=[AutoRunStep(step_name="agent", status="failed",
+                                   message=str(exc), duration_ms=0)],
                 overall_status="failed",
-                summary="Autonomous run stopped: planning step failed.",
+                summary=f"Agent error: {exc}",
             )
 
-        # ── STEP 2: DIFF ────────────────────────────────────────────────
-        t0 = time.monotonic()
-        diff_prompt = self._build_enriched_prompt(
-            user_message=request.task,
-            context=context,
-            session=session,
-            intent="modify",
-        )
-        diff_prompt += (
-            "\n\nIMPORTANT: This is an AUTONOMOUS run. "
-            "Respond with ONLY the unified diff inside a ```diff block — no extra text."
-        )
-        try:
-            diff_response = await self.model_router.generate_response(diff_prompt, max_tokens=4000)
-            action_plan = self.action_planner.plan_action(
-                user_message=request.task,
-                model_response=diff_response,
-                context=context,
-            )
-            raw_diff = action_plan.get("diff")
-            if not raw_diff:
-                steps.append(AutoRunStep(
-                    step_name="diff", status="failed",
-                    message="Model did not produce a parseable diff.",
-                    duration_ms=int((time.monotonic() - t0) * 1000),
-                ))
-                return AutoRunResponse(
-                    session_id=session_id, task=request.task, steps=steps,
-                    overall_status="failed",
-                    summary="Autonomous run stopped: no diff could be extracted from the model response.",
-                )
-            steps.append(AutoRunStep(
-                step_name="diff", status="success",
-                message=f"Generated diff ({raw_diff.count(chr(10))} lines).",
-                duration_ms=int((time.monotonic() - t0) * 1000),
-            ))
-            logger.info(f"AutoRun[{session_id}] DIFF done")
-        except Exception as exc:
-            steps.append(AutoRunStep(
-                step_name="diff", status="failed",
-                message=f"Diff generation failed: {exc}",
-                duration_ms=int((time.monotonic() - t0) * 1000),
-            ))
-            return AutoRunResponse(
-                session_id=session_id, task=request.task, steps=steps,
-                overall_status="failed",
-                summary="Autonomous run stopped: diff generation failed.",
-            )
+        total_ms = int((time.monotonic() - t_start) * 1000)
+        steps = self._agent_result_to_steps(result, total_ms)
 
-        # ── STEP 3: APPLY ───────────────────────────────────────────────
-        t0 = time.monotonic()
-        try:
-            task_request = TaskRequest(
-                task_id=f"autorun-{session_id}-{int(datetime.utcnow().timestamp())}",
-                description=f"Autonomous run: {request.task}",
-                diff=raw_diff,
-                mode="CRITICAL",
-                force=request.push,
-            )
-            exec_result = self.engine.execute(task_request)
-            result_card = ExecutionResultCard(
-                status=exec_result.status,
-                mode=exec_result.mode,
-                commit_sha=exec_result.commit_sha,
-                files_changed=exec_result.files_changed,
-                lines_changed=exec_result.lines_changed,
-                pushed=exec_result.pushed,
-                verify_steps=exec_result.verify_steps or [],
-                rollback_command=exec_result.rollback_command,
-                pre_test_passed=(
-                    exec_result.pre_test_result.passed if exec_result.pre_test_result else None
-                ),
-                post_test_passed=(
-                    exec_result.post_test_result.passed if exec_result.post_test_result else None
-                ),
-                validation_passed=(
-                    exec_result.validation_result.passed if exec_result.validation_result else None
-                ),
-                error=exec_result.error,
-            )
-            self.session_manager.set_last_execution(session_id, result_card)
-            apply_ok = exec_result.status == "Working"
-            steps.append(AutoRunStep(
-                step_name="apply",
-                status="success" if apply_ok else "failed",
-                message=(
-                    f"Applied: {len(exec_result.files_changed)} file(s) changed, "
-                    f"commit {(exec_result.commit_sha or 'N/A')[:8]}."
-                    if apply_ok else f"Apply failed: {exec_result.error}"
-                ),
-                duration_ms=int((time.monotonic() - t0) * 1000),
-            ))
-            logger.info(f"AutoRun[{session_id}] APPLY done — status={exec_result.status}")
-        except Exception as exc:
-            steps.append(AutoRunStep(
-                step_name="apply", status="failed",
-                message=f"Apply step raised an exception: {exc}",
-                duration_ms=int((time.monotonic() - t0) * 1000),
-            ))
-            return AutoRunResponse(
-                session_id=session_id, task=request.task, steps=steps,
-                overall_status="failed",
-                summary="Autonomous run stopped: apply step failed.",
-            )
+        # Commit any files the agent wrote
+        result_card: Optional[ExecutionResultCard] = None
+        if result.files_written:
+            result_card = self._commit_agent_changes(session_id, request.task, result, repo_path)
 
-        # ── STEP 4: VERIFY ──────────────────────────────────────────────
-        t0 = time.monotonic()
-        post_ok = result_card.post_test_passed
-        verify_msg = (
-            "All post-apply tests passed ✓" if post_ok is True
-            else "Post-apply tests failed ✗" if post_ok is False
-            else "No test results available (tests may not be configured)."
-        )
-        steps.append(AutoRunStep(
-            step_name="verify",
-            status="success" if post_ok is not False else "failed",
-            message=verify_msg,
-            duration_ms=int((time.monotonic() - t0) * 1000),
-        ))
+        overall = "success" if result.success else "failed"
+        summary = result.summary
 
-        failed_steps = [s for s in steps if s.status == "failed"]
-        overall = "failed" if failed_steps else "success"
-        summary = (
-            f"✓ Task completed: {len(steps) - len(failed_steps)}/{len(steps)} steps succeeded. "
-            f"Commit: {(result_card.commit_sha or 'none')[:8]}."
-            if overall == "success"
-            else f"✗ Task finished with errors in: {', '.join(s.step_name for s in failed_steps)}."
-        )
-
-        # Record in session history
         self.session_manager.add_message(session_id, ChatMessage(
-            role="assistant",
-            content=f"[AutoRun] {summary}",
+            role="assistant", content=f"[AutoRun] {summary}"
         ))
 
         return AutoRunResponse(
@@ -751,6 +613,92 @@ class InteractiveOrchestrator:
             summary=summary,
             execution_result=result_card,
         )
+
+    def _agent_result_to_steps(self, result, total_ms: int) -> list[AutoRunStep]:
+        """Convert AgentLoop tool call log into AutoRunStep cards."""
+        if not result.tool_calls:
+            return [AutoRunStep(
+                step_name="agent",
+                status="success" if result.success else "failed",
+                message=result.summary,
+                duration_ms=total_ms,
+            )]
+
+        # Group by phase
+        phases: dict[str, list] = {"explore": [], "implement": [], "test": [], "finish": []}
+        for tc in result.tool_calls:
+            if tc.tool_name in ("read_file", "list_dir", "search_code"):
+                phases["explore"].append(tc)
+            elif tc.tool_name == "write_file":
+                phases["implement"].append(tc)
+            elif tc.tool_name == "run_command":
+                phases["test"].append(tc)
+            else:
+                phases["finish"].append(tc)
+
+        steps: list[AutoRunStep] = []
+        for phase, calls in phases.items():
+            if not calls:
+                continue
+            dur = sum(c.duration_ms for c in calls)
+            if phase == "explore":
+                msg = f"Read {len(calls)} file(s)/search(es)"
+            elif phase == "implement":
+                names = ", ".join(c.tool_input.get("path", "?") for c in calls)
+                msg = f"Wrote: {names}"
+            elif phase == "test":
+                cmds = [c.tool_input.get("command", "?")[:60] for c in calls]
+                exits = [c.result[:30] for c in calls]
+                msg = f"Ran {len(calls)} command(s): {'; '.join(cmds)}"
+                # Mark failed if any command exited non-zero
+                status = "failed" if any("[exit " in e and "[exit 0]" not in e for e in exits) else "success"
+                steps.append(AutoRunStep(step_name=phase, status=status, message=msg, duration_ms=dur))
+                continue
+            else:
+                msg = result.summary
+            steps.append(AutoRunStep(step_name=phase, status="success", message=msg, duration_ms=dur))
+
+        if not steps:
+            steps.append(AutoRunStep(
+                step_name="agent",
+                status="success" if result.success else "failed",
+                message=result.summary,
+                duration_ms=total_ms,
+            ))
+        return steps
+
+    def _commit_agent_changes(
+        self, session_id: str, task: str, result, repo_path: str
+    ) -> Optional[ExecutionResultCard]:
+        """git add + commit all files the agent wrote, store result card."""
+        try:
+            subprocess.run(["git", "add", "-A"], cwd=repo_path, check=True,
+                           capture_output=True, timeout=15)
+            msg = f"agent: {task[:72]}"
+            proc = subprocess.run(
+                ["git", "commit", "-m", msg],
+                cwd=repo_path, capture_output=True, text=True, timeout=15
+            )
+            if proc.returncode == 0:
+                sha_proc = subprocess.run(
+                    ["git", "rev-parse", "--short", "HEAD"],
+                    cwd=repo_path, capture_output=True, text=True
+                )
+                sha = sha_proc.stdout.strip()
+                card = ExecutionResultCard(
+                    status="Working", mode="CRITICAL",
+                    commit_sha=sha,
+                    files_changed=result.files_written,
+                )
+                self.session_manager.set_last_execution(session_id, card)
+                logger.info(f"AgentLoop commit {sha} for session {session_id}")
+                return card
+            else:
+                # Nothing to commit is not an error
+                logger.info(f"git commit skipped: {proc.stdout.strip() or proc.stderr.strip()}")
+        except Exception as exc:
+            logger.warning(f"Could not commit agent changes: {exc}")
+        return None
 
 
 # Global orchestrator instance

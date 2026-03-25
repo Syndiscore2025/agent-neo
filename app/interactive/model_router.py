@@ -249,6 +249,70 @@ class ModelRouter:
         logger.warning("No API keys configured for completion")
         return ""
     
+    async def generate_with_tools(
+        self,
+        system: str,
+        messages: list,
+        tools: list,
+        max_tokens: int = 4096,
+    ) -> dict:
+        """
+        Generate a response with Anthropic native tool-use.
+
+        Returns:
+            {
+                "text": str,          # concatenated text blocks
+                "tool_calls": [       # list of tool call dicts
+                    {"id": str, "name": str, "input": dict}
+                ],
+                "raw_content": list,  # raw content blocks (for multi-turn)
+            }
+        """
+        if not self._anthropic_client:
+            raise ValueError("Anthropic client not initialised. Check ANTHROPIC_API_KEY.")
+
+        model_name = "claude-sonnet-4-20250514"
+        response = self._anthropic_client.messages.create(
+            model=model_name,
+            max_tokens=max_tokens,
+            system=system,
+            tools=tools,
+            messages=messages,
+        )
+
+        text_parts: list[str] = []
+        tool_calls: list[dict] = []
+        raw_content = response.content   # list of ContentBlock objects
+
+        for block in raw_content:
+            if block.type == "text":
+                text_parts.append(block.text)
+            elif block.type == "tool_use":
+                tool_calls.append({
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                })
+
+        # Convert raw content to serialisable dicts for multi-turn messages
+        raw_serialisable = []
+        for block in raw_content:
+            if block.type == "text":
+                raw_serialisable.append({"type": "text", "text": block.text})
+            elif block.type == "tool_use":
+                raw_serialisable.append({
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                })
+
+        return {
+            "text": "\n".join(text_parts),
+            "tool_calls": tool_calls,
+            "raw_content": raw_serialisable,
+        }
+
     def is_configured(self) -> bool:
         """Check if at least one model is configured."""
         return bool(self.anthropic_api_key or self.openai_api_key)
