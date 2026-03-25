@@ -573,7 +573,11 @@ class InteractiveOrchestrator:
 
         context = self.context_engine.gather_context(request.context)
 
-        repo_path = getattr(self.engine, "repo_path", None) or os.getenv("REPO_PATH", ".")
+        repo_path = (
+            getattr(request.context, "workspace_path", None)
+            or getattr(self.engine, "repo_path", None)
+            or os.getenv("REPO_PATH", ".")
+        )
 
         agent = AgentLoop(model_router=self.model_router, repo_path=repo_path)
 
@@ -632,7 +636,11 @@ class InteractiveOrchestrator:
         if request.context and getattr(request.context, "diagnostics", None):
             context["diagnostics"] = request.context.diagnostics
 
-        repo_path = getattr(self.engine, "repo_path", None) or os.getenv("REPO_PATH", ".")
+        repo_path = (
+            getattr(request.context, "workspace_path", None)
+            or getattr(self.engine, "repo_path", None)
+            or os.getenv("REPO_PATH", ".")
+        )
         agent = AgentLoop(model_router=self.model_router, repo_path=repo_path)
 
         files_written: list[str] = []

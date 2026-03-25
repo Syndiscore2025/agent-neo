@@ -258,12 +258,16 @@ class AgentLoop:
                                 result=result_text, duration_ms=dur_each)
                 tool_calls_log.append(call)
                 tool_results.append({"type": "tool_result", "tool_use_id": tc["id"], "content": result_text})
-                yield {
+                event: dict = {
                     "type": "tool_end",
                     "tool": tc["name"],
                     "result": result_text[:400],
                     "duration_ms": dur_each,
                 }
+                # For write_file, include the path so the extension can open it
+                if tc["name"] == "write_file" and tc["input"].get("path"):
+                    event["path"] = tc["input"]["path"].lstrip("/\\")
+                yield event
 
             for tc in finish_calls:
                 inp = tc["input"]

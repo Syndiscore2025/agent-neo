@@ -119,6 +119,9 @@ class ChatPanel {
             case 'autoRun':
                 await this.handleAutoRun(message.task);
                 break;
+            case 'cloneRepo':
+                await this.handleCloneRepo(message.url);
+                break;
         }
     }
     /**
@@ -747,7 +750,7 @@ class ChatPanel {
 
                 <div id="suggestionsContainer"></div>
                 <div id="attachmentPreview"></div>
-                <div id="slashHint">💡 Slash commands: /plan &nbsp;/fix &nbsp;/verify &nbsp;/rollback &nbsp;/run &lt;task&gt; &nbsp;/help</div>
+                <div id="slashHint">💡 Slash commands: /plan &nbsp;/fix &nbsp;/verify &nbsp;/rollback &nbsp;/run &lt;task&gt; &nbsp;/clone &lt;url&gt; &nbsp;/help</div>
 
                 <div id="inputArea">
                     <button id="attachBtn" title="Attach image or PDF">📎</button>
@@ -899,7 +902,8 @@ class ChatPanel {
                                 '/verify  — re-run tests and report status\\n' +
                                 '/rollback or /undo — revert last applied commit (local only)\\n' +
                                 '/newthread or /new  — summarise thread and continue in fresh session\\n' +
-                                '/run <task>         — run a task fully autonomously (no mid-step approvals)'
+                                '/run <task>         — run a task fully autonomously (no mid-step approvals)\\n' +
+                                '/clone <github-url> — clone a GitHub repo and open it in VS Code'
                             );
                             return true;
                         }
@@ -908,6 +912,14 @@ class ChatPanel {
                             const task = cmd.slice(5).trim();
                             if (task) {
                                 vscode.postMessage({ type: 'autoRun', task });
+                                return true;
+                            }
+                        }
+                        // /clone <url> → clone GitHub repo and open folder
+                        if (lower.startsWith('/clone ')) {
+                            const url = cmd.slice(7).trim();
+                            if (url) {
+                                vscode.postMessage({ type: 'cloneRepo', url });
                                 return true;
                             }
                         }
@@ -1601,6 +1613,10 @@ class ChatPanel {
                         const event = JSON.parse(json);
                         // Forward every SSE event directly to the webview
                         this.panel?.webview.postMessage({ type: 'streamEvent', event });
+                        // File reveal: open written files in the VS Code editor
+                        if (event.type === 'tool_end' && event.tool === 'write_file' && event.path) {
+                            this._revealFile(event.path);
+                        }
                     }
                     catch {
                         // malformed chunk — skip
@@ -1618,6 +1634,74 @@ class ChatPanel {
         finally {
             this.panel?.webview.postMessage({ type: 'streamRunDone' });
         }
+    }
+    /**
+     * Open a file written by the agent in the VS Code editor.
+     * path is repo-relative; resolved against the current workspace root.
+     */
+    async _revealFile(relPath) {
+        try {
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (!workspaceFolders || workspaceFolders.length === 0) {
+                return;
+            }
+            const root = workspaceFolders[0].uri;
+            const fileUri = vscode.Uri.joinPath(root, relPath);
+            const doc = await vscode.workspace.openTextDocument(fileUri);
+            await vscode.window.showTextDocument(doc, { preview: false, preserveFocus: true });
+        }
+        catch {
+            // file might not be in the current workspace — silently skip
+        }
+    }
+    /**
+     * Clone a GitHub repo to a user-chosen folder, then open it in VS Code.
+     */
+    async handleCloneRepo(url) {
+        if (!url) {
+            vscode.window.showWarningMessage('Usage: /clone <github-url>');
+            return;
+        }
+        const picks = await vscode.window.showOpenDialog({
+            canSelectFiles: false,
+            canSelectFolders: true,
+            canSelectMany: false,
+            openLabel: 'Clone into this folder',
+        });
+        if (!picks || picks.length === 0) {
+            return;
+        }
+        const destDir = picks[0].fsPath;
+        const repoName = url.split('/').pop()?.replace(/\.git$/, '') || 'repo';
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const path = require('path');
+        const clonePath = path.join(destDir, repoName);
+        this.panel?.webview.postMessage({ type: 'userMessage', message: `/clone ${url}` });
+        this.panel?.webview.postMessage({ type: 'loading', loading: true });
+        const clonePromise = new Promise((resolve, reject) => {
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const cp = require('child_process');
+            cp.execFile('git', ['clone', url, clonePath], { timeout: 120000 }, (err) => {
+                if (err) {
+                    reject(err);
+                }
+                else {
+                    resolve();
+                }
+            });
+        });
+        vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Cloning ${repoName}…`, cancellable: false }, () => clonePromise);
+        clonePromise.then(async () => {
+            const folderUri = vscode.Uri.file(clonePath);
+            // Open the cloned folder in the current window so the backend
+            // picks up the new workspace_path on the next /run.
+            await vscode.commands.executeCommand('vscode.openFolder', folderUri, { forceNewWindow: false });
+        }).catch((err) => {
+            vscode.window.showErrorMessage(`Clone failed: ${err.message}`);
+            this.panel?.webview.postMessage({ type: 'error', message: `Clone failed: ${err.message}` });
+        }).finally(() => {
+            this.panel?.webview.postMessage({ type: 'loading', loading: false });
+        });
     }
     /**
      * Dispose the panel.
