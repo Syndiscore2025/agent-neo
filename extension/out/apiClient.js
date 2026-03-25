@@ -162,6 +162,13 @@ class ApiClient {
      * @param context     Optional editor context (currentFile, etc.).
      * @param push        If true, push to remote after applying.
      */
+    /**
+     * Return the base URL + auth headers needed for fetch-based SSE streaming.
+     * Callers use these to call /chat/autorun/stream via the Fetch API.
+     */
+    getStreamConfig() {
+        return { url: this.apiUrl, token: this.apiToken };
+    }
     async autoRun(task, sessionId, context, push = false) {
         const response = await this.client.post('/chat/autorun', {
             task,

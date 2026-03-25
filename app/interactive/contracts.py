@@ -52,6 +52,8 @@ class ChatContext(BaseModel):
     selection_end_line: Optional[int] = None
     workspace_path: Optional[str] = None
     language: Optional[str] = None
+    # VS Code diagnostics (errors/warnings) collected by the extension
+    diagnostics: Optional[List[str]] = Field(default_factory=list)
 
 
 class ChatRequest(BaseModel):
@@ -218,4 +220,22 @@ class AutoRunResponse(BaseModel):
     summary: str
     execution_result: Optional[ExecutionResultCard] = None
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ---------------------------------------------------------------------------
+# SSE Streaming events (yielded by /chat/autorun/stream)
+# ---------------------------------------------------------------------------
+class StreamEvent(BaseModel):
+    """Single SSE payload emitted during a streaming agent run."""
+    type: str          # "tool_start" | "tool_end" | "text" | "finish" | "commit" | "error"
+    tool: Optional[str] = None
+    input: Optional[Dict[str, Any]] = None
+    result: Optional[str] = None
+    duration_ms: Optional[int] = None
+    content: Optional[str] = None   # incremental text tokens
+    success: Optional[bool] = None
+    summary: Optional[str] = None
+    sha: Optional[str] = None
+    files: Optional[List[str]] = None
+    error: Optional[str] = None
 

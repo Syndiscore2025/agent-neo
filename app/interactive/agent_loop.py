@@ -3,10 +3,11 @@ AGENT NEO - Agentic ReAct Loop
 Tool-calling agent that mirrors Augment's flow:
   observe → think → act (tool) → observe → … → finish
 """
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, AsyncGenerator, Optional
 
 from app.interactive.tools import ToolExecutor, TOOL_SCHEMAS
 
@@ -32,19 +33,20 @@ class AgentResult:
     error: Optional[str] = None
 
 
-# ── System prompt ─────────────────────────────────────────────────────────────
-_SYSTEM = """You are Agent NEO, an autonomous coding assistant.
-You have access to real tools: read_file, write_file, list_dir, run_command, search_code, finish.
+# ── Base system prompt ────────────────────────────────────────────────────────
+_BASE_SYSTEM = """You are Agent NEO, an autonomous coding assistant.
+You have access to real tools: read_file, write_file, list_dir, run_command, search_code, web_search, semantic_search, finish.
 
 Guidelines:
 1. ALWAYS read a file before modifying it so you write the full correct content.
-2. Use search_code to discover relevant code before writing.
+2. Use semantic_search or search_code to discover relevant code before writing.
 3. Use list_dir to explore unfamiliar directories.
 4. After writing files, run tests or a linter with run_command to verify.
 5. If tests fail, read the error output carefully, fix the code, and run tests again.
 6. When done (or no further progress is possible), call finish with a clear summary.
 7. Never call git push. Never delete files unless explicitly instructed.
 8. Write complete file contents — never use placeholders like '# ... rest unchanged'.
+9. You may call multiple independent tools in a single response — they will execute in parallel.
 """
 
 
@@ -54,7 +56,7 @@ class AgentLoop:
 
     Each iteration:
       1. Ask the LLM (with tools) what to do next
-      2. Execute every tool call it requests
+      2. Execute every tool call it requests (in parallel when safe)
       3. Feed results back as user messages
       4. Repeat until the model calls `finish` or MAX_ITERATIONS reached
     """
@@ -63,11 +65,19 @@ class AgentLoop:
         self.model_router = model_router
         self.repo_path = repo_path
 
+    def _build_system(self) -> str:
+        """Build system prompt: base rules + project guidelines."""
+        try:
+            from app.interactive.guidelines import build_system_prompt
+            return build_system_prompt(_BASE_SYSTEM, self.repo_path)
+        except Exception:
+            return _BASE_SYSTEM
+
     async def run(self, task: str, context: dict) -> AgentResult:
         executor = ToolExecutor(self.repo_path)
         tool_calls_log: list[ToolCall] = []
+        system = self._build_system()
 
-        # Build initial user message
         user_content = self._build_task_message(task, context)
         messages: list[dict] = [{"role": "user", "content": user_content}]
 
@@ -76,7 +86,7 @@ class AgentLoop:
 
             try:
                 llm_resp = await self.model_router.generate_with_tools(
-                    system=_SYSTEM,
+                    system=system,
                     messages=messages,
                     tools=TOOL_SCHEMAS,
                     max_tokens=4096,
@@ -93,7 +103,6 @@ class AgentLoop:
 
             tool_calls: list[dict] = llm_resp.get("tool_calls", [])
 
-            # No tool calls → model is done (text-only response)
             if not tool_calls:
                 return AgentResult(
                     success=True,
@@ -102,48 +111,63 @@ class AgentLoop:
                     files_written=executor.files_written,
                 )
 
-            # Append assistant turn (raw content blocks)
             messages.append({"role": "assistant", "content": llm_resp["raw_content"]})
 
-            # Execute each tool call and collect results
+            # ── Parallel execution: run all non-finish tool calls concurrently ──
+            t0 = time.monotonic()
+            finish_calls = [tc for tc in tool_calls if tc["name"] == "finish"]
+            exec_calls = [tc for tc in tool_calls if tc["name"] != "finish"]
+
+            if exec_calls:
+                loop = asyncio.get_event_loop()
+                results_text = await asyncio.gather(*[
+                    loop.run_in_executor(None, executor.execute, tc["name"], tc["input"])
+                    for tc in exec_calls
+                ])
+            else:
+                results_text = []
+
+            dur_each = int((time.monotonic() - t0) * 1000 / max(len(exec_calls), 1))
             tool_results = []
-            finished = False
-            finish_result: Optional[AgentResult] = None
 
-            for tc in tool_calls:
-                t0 = time.monotonic()
-                name = tc["name"]
-                inp = tc["input"]
-
-                logger.info(f"  → tool={name} input_keys={list(inp.keys())}")
-                result_text = executor.execute(name, inp)
-                dur = int((time.monotonic() - t0) * 1000)
-
-                call = ToolCall(tool_name=name, tool_input=inp, result=result_text, duration_ms=dur)
+            for tc, result_text in zip(exec_calls, results_text):
+                logger.info(f"  → tool={tc['name']} input_keys={list(tc['input'].keys())}")
+                call = ToolCall(tool_name=tc["name"], tool_input=tc["input"],
+                                result=result_text, duration_ms=dur_each)
                 tool_calls_log.append(call)
-
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tc["id"],
                     "content": result_text,
                 })
 
-                if name == "finish":
-                    finished = True
-                    finish_result = AgentResult(
-                        success=bool(inp.get("success", True)),
-                        summary=inp.get("summary", result_text),
-                        tool_calls=tool_calls_log,
-                        files_written=executor.files_written,
-                    )
+            # Handle finish calls
+            finished = False
+            finish_result: Optional[AgentResult] = None
+            for tc in finish_calls:
+                inp = tc["input"]
+                result_text = f"[finish] {inp.get('summary', '')}"
+                call = ToolCall(tool_name="finish", tool_input=inp,
+                                result=result_text, duration_ms=0)
+                tool_calls_log.append(call)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tc["id"],
+                    "content": result_text,
+                })
+                finished = True
+                finish_result = AgentResult(
+                    success=bool(inp.get("success", True)),
+                    summary=inp.get("summary", result_text),
+                    tool_calls=tool_calls_log,
+                    files_written=executor.files_written,
+                )
 
-            # Feed results back into conversation
             messages.append({"role": "user", "content": tool_results})
 
             if finished and finish_result:
                 return finish_result
 
-        # Exceeded max iterations
         return AgentResult(
             success=False,
             summary=f"Reached max iterations ({MAX_ITERATIONS}). Task may be incomplete.",
@@ -151,6 +175,113 @@ class AgentLoop:
             files_written=executor.files_written,
             error="max_iterations_exceeded",
         )
+
+    async def run_stream(self, task: str, context: dict) -> AsyncGenerator[dict, None]:
+        """
+        Streaming ReAct loop — yields SSE-compatible dicts at each step.
+        Compatible with StreamEvent schema in contracts.py.
+        """
+        executor = ToolExecutor(self.repo_path)
+        tool_calls_log: list[ToolCall] = []
+        system = self._build_system()
+
+        user_content = self._build_task_message(task, context)
+        messages: list[dict] = [{"role": "user", "content": user_content}]
+
+        for iteration in range(MAX_ITERATIONS):
+            pending_tool_calls: list[dict] = []  # {"id", "name", "input"}
+            raw_content_blocks: list[dict] = []
+            text_buf = ""
+
+            # Stream the LLM response
+            async for chunk in self.model_router.stream_with_tools(
+                system=system,
+                messages=messages,
+                tools=TOOL_SCHEMAS,
+                max_tokens=4096,
+            ):
+                ctype = chunk.get("type")
+                if ctype == "text":
+                    text_buf += chunk["content"]
+                    yield {"type": "text", "content": chunk["content"]}
+                elif ctype == "tool_start":
+                    yield {"type": "tool_start", "tool": chunk["tool"]}
+                elif ctype == "tool_ready":
+                    pending_tool_calls.append({
+                        "id": chunk["id"],
+                        "name": chunk["tool"],
+                        "input": chunk["input"],
+                    })
+                elif ctype == "error":
+                    yield {"type": "error", "error": chunk["error"]}
+                    return
+                elif ctype == "done":
+                    break
+
+            # Build raw_content for multi-turn
+            if text_buf:
+                raw_content_blocks.append({"type": "text", "text": text_buf})
+            for tc in pending_tool_calls:
+                raw_content_blocks.append({
+                    "type": "tool_use",
+                    "id": tc["id"],
+                    "name": tc["name"],
+                    "input": tc["input"],
+                })
+
+            if not pending_tool_calls:
+                # Text-only → done
+                yield {"type": "finish", "success": True, "summary": text_buf or "Task complete."}
+                return
+
+            messages.append({"role": "assistant", "content": raw_content_blocks})
+
+            # Execute tools in parallel (skip finish)
+            finish_calls = [tc for tc in pending_tool_calls if tc["name"] == "finish"]
+            exec_calls = [tc for tc in pending_tool_calls if tc["name"] != "finish"]
+
+            t0 = time.monotonic()
+            if exec_calls:
+                loop = asyncio.get_event_loop()
+                results_text = list(await asyncio.gather(*[
+                    loop.run_in_executor(None, executor.execute, tc["name"], tc["input"])
+                    for tc in exec_calls
+                ]))
+            else:
+                results_text = []
+
+            dur_each = int((time.monotonic() - t0) * 1000 / max(len(exec_calls), 1))
+            tool_results = []
+
+            for tc, result_text in zip(exec_calls, results_text):
+                call = ToolCall(tool_name=tc["name"], tool_input=tc["input"],
+                                result=result_text, duration_ms=dur_each)
+                tool_calls_log.append(call)
+                tool_results.append({"type": "tool_result", "tool_use_id": tc["id"], "content": result_text})
+                yield {
+                    "type": "tool_end",
+                    "tool": tc["name"],
+                    "result": result_text[:400],
+                    "duration_ms": dur_each,
+                }
+
+            for tc in finish_calls:
+                inp = tc["input"]
+                tool_results.append({"type": "tool_result", "tool_use_id": tc["id"],
+                                     "content": f"[finish] {inp.get('summary', '')}"})
+                yield {
+                    "type": "finish",
+                    "success": bool(inp.get("success", True)),
+                    "summary": inp.get("summary", ""),
+                    "files": executor.files_written,
+                }
+                return
+
+            messages.append({"role": "user", "content": tool_results})
+
+        yield {"type": "finish", "success": False,
+               "summary": f"Reached max iterations ({MAX_ITERATIONS}).",
+               "files": executor.files_written}
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -165,6 +296,13 @@ class AgentLoop:
             parts.append(
                 f"Repo: {s.get('total_files', '?')} files | "
                 f"langs: {', '.join(s.get('languages', []))}"
+            )
+        # Inject VS Code diagnostics (errors / warnings from IDE)
+        diagnostics = context.get("diagnostics") or []
+        if diagnostics:
+            diag_lines = "\n".join(f"  • {d}" for d in diagnostics[:20])
+            parts.append(
+                f"CURRENT IDE DIAGNOSTICS (errors/warnings you should fix):\n{diag_lines}"
             )
         return "\n\n".join(parts)
 

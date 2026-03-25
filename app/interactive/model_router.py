@@ -313,6 +313,81 @@ class ModelRouter:
             "raw_content": raw_serialisable,
         }
 
+    async def stream_with_tools(
+        self,
+        system: str,
+        messages: list,
+        tools: list,
+        max_tokens: int = 4096,
+    ):
+        """
+        Async generator — streams an Anthropic tool-use response event by event.
+
+        Yields dicts with 'type' field:
+          {"type": "text",       "content": str}
+          {"type": "tool_start", "tool": str, "id": str, "input": {}}
+          {"type": "done"}
+          {"type": "error",      "error": str}
+        """
+        if not self._anthropic_client:
+            yield {"type": "error", "error": "Anthropic client not initialised. Check ANTHROPIC_API_KEY."}
+            return
+
+        model_name = "claude-sonnet-4-20250514"
+        try:
+            import anthropic as _ant
+            with self._anthropic_client.messages.stream(
+                model=model_name,
+                max_tokens=max_tokens,
+                system=system,
+                tools=tools,
+                messages=messages,
+            ) as stream:
+                current_tool_id: str | None = None
+                current_tool_name: str | None = None
+                current_tool_json: str = ""
+
+                for event in stream:
+                    etype = type(event).__name__
+
+                    if etype == "RawContentBlockStartEvent":
+                        block = event.content_block
+                        if block.type == "tool_use":
+                            current_tool_id = block.id
+                            current_tool_name = block.name
+                            current_tool_json = ""
+                            yield {"type": "tool_start", "tool": block.name, "id": block.id, "input": {}}
+
+                    elif etype == "RawContentBlockDeltaEvent":
+                        delta = event.delta
+                        if delta.type == "text_delta":
+                            yield {"type": "text", "content": delta.text}
+                        elif delta.type == "input_json_delta":
+                            current_tool_json += delta.partial_json
+
+                    elif etype == "RawContentBlockStopEvent":
+                        if current_tool_name:
+                            import json as _json
+                            try:
+                                parsed_input = _json.loads(current_tool_json) if current_tool_json else {}
+                            except Exception:
+                                parsed_input = {}
+                            yield {
+                                "type": "tool_ready",
+                                "tool": current_tool_name,
+                                "id": current_tool_id,
+                                "input": parsed_input,
+                            }
+                            current_tool_id = None
+                            current_tool_name = None
+                            current_tool_json = ""
+
+                yield {"type": "done"}
+
+        except Exception as exc:
+            logger.error(f"stream_with_tools error: {exc}", exc_info=True)
+            yield {"type": "error", "error": str(exc)}
+
     def is_configured(self) -> bool:
         """Check if at least one model is configured."""
         return bool(self.anthropic_api_key or self.openai_api_key)

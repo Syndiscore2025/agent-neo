@@ -1329,25 +1329,22 @@ export class ChatPanel {
                                 renderSuggestions(message.suggestions || []);
                                 break;
 
-                            // Autonomous task runner result card
+                            // ── Legacy batch autorun result (kept for fallback) ──
                             case 'autoRunResult': {
                                 const iconMap = { success: '✅', failed: '❌', skipped: '⏭️' };
                                 const statusIcon = message.overallStatus === 'success' ? '✅' : '❌';
                                 let html = '<div class="auto-run-card">';
                                 html += '<div class="auto-run-header">';
                                 html += statusIcon + ' <strong>AutoRun:</strong> ' + escapeHtml(message.task);
-                                html += '</div>';
-                                html += '<div class="auto-run-steps">';
+                                html += '</div><div class="auto-run-steps">';
                                 (message.steps || []).forEach(step => {
                                     const icon = iconMap[step.status] || '⬜';
                                     const ms = step.duration_ms ? ' <span class="step-ms">(' + step.duration_ms + 'ms)</span>' : '';
                                     html += '<div class="auto-run-step step-' + step.status + '">';
                                     html += icon + ' <strong>' + step.step_name.toUpperCase() + '</strong>' + ms + '<br>';
-                                    html += '<span class="step-msg">' + escapeHtml(step.message) + '</span>';
-                                    html += '</div>';
+                                    html += '<span class="step-msg">' + escapeHtml(step.message) + '</span></div>';
                                 });
-                                html += '</div>';
-                                html += '<div class="auto-run-summary">' + escapeHtml(message.summary) + '</div>';
+                                html += '</div><div class="auto-run-summary">' + escapeHtml(message.summary) + '</div>';
                                 if (message.executionResult && message.executionResult.commit_sha) {
                                     html += '<div class="auto-run-commit">🔖 Commit: ' + message.executionResult.commit_sha.slice(0, 8) + '</div>';
                                 }
@@ -1357,6 +1354,82 @@ export class ChatPanel {
                                 wrapper.innerHTML = html;
                                 messagesDiv.appendChild(wrapper);
                                 scrollToBottom();
+                                break;
+                            }
+
+                            // ── Live streaming run card ──────────────────────────
+                            case 'streamRunStart': {
+                                // Create a live card element we'll update in-place
+                                const card = document.createElement('div');
+                                card.className = 'message assistant';
+                                card.id = 'streamRunCard';
+                                card.innerHTML =
+                                    '<div class="auto-run-card">' +
+                                    '<div class="auto-run-header" id="srHeader">⚙️ <strong>Running:</strong> ' + escapeHtml(message.task) + '</div>' +
+                                    '<div class="auto-run-steps" id="srSteps"></div>' +
+                                    '<div id="srTokens" style="font-style:italic;opacity:0.75;font-size:12px;padding-top:4px;white-space:pre-wrap"></div>' +
+                                    '</div>';
+                                messagesDiv.appendChild(card);
+                                scrollToBottom();
+                                break;
+                            }
+
+                            case 'streamEvent': {
+                                const ev = message.event || {};
+                                const stepsEl = document.getElementById('srSteps');
+                                const tokensEl = document.getElementById('srTokens');
+                                const headerEl = document.getElementById('srHeader');
+
+                                if (ev.type === 'text' && tokensEl) {
+                                    tokensEl.textContent += ev.content || '';
+                                    scrollToBottom();
+                                } else if (ev.type === 'tool_start' && stepsEl) {
+                                    const row = document.createElement('div');
+                                    row.className = 'auto-run-step';
+                                    row.id = 'sr_tool_' + (ev.tool || 'unknown');
+                                    row.innerHTML = '🔧 <strong>' + escapeHtml(ev.tool || '') + '</strong> <span style="opacity:.6">running…</span>';
+                                    stepsEl.appendChild(row);
+                                    scrollToBottom();
+                                } else if (ev.type === 'tool_end' && stepsEl) {
+                                    const existing = document.getElementById('sr_tool_' + ev.tool);
+                                    const ms = ev.duration_ms ? ' (' + ev.duration_ms + 'ms)' : '';
+                                    const snippet = (ev.result || '').slice(0, 120);
+                                    const row = existing || document.createElement('div');
+                                    row.className = 'auto-run-step step-success';
+                                    row.innerHTML = '✅ <strong>' + escapeHtml(ev.tool || '') + '</strong>' + ms +
+                                        (snippet ? '<br><span class="step-msg">' + escapeHtml(snippet) + '</span>' : '');
+                                    if (!existing) { stepsEl.appendChild(row); }
+                                    scrollToBottom();
+                                } else if (ev.type === 'finish') {
+                                    if (headerEl) {
+                                        headerEl.innerHTML = (ev.success ? '✅' : '❌') + ' <strong>AutoRun done</strong>';
+                                    }
+                                    if (tokensEl && ev.summary) {
+                                        tokensEl.textContent = ev.summary;
+                                    }
+                                    scrollToBottom();
+                                } else if (ev.type === 'commit') {
+                                    const card = document.getElementById('streamRunCard');
+                                    if (card) {
+                                        const c = document.createElement('div');
+                                        c.className = 'auto-run-commit';
+                                        c.textContent = '🔖 Committed: ' + (ev.sha || '').slice(0, 8);
+                                        card.querySelector('.auto-run-card')?.appendChild(c);
+                                    }
+                                } else if (ev.type === 'error') {
+                                    if (headerEl) {
+                                        headerEl.innerHTML = '❌ <strong>Error:</strong> ' + escapeHtml(ev.error || 'Unknown error');
+                                    }
+                                }
+                                break;
+                            }
+
+                            case 'streamRunDone': {
+                                // Remove the live card ID so future events don't affect it
+                                const card = document.getElementById('streamRunCard');
+                                if (card) { card.removeAttribute('id'); }
+                                isLoading = false;
+                                sendBtn.disabled = false;
                                 break;
                             }
                         }
@@ -1486,43 +1559,77 @@ export class ChatPanel {
     }
 
     /**
-     * Handle autonomous task run request from webview.
+     * Handle autonomous task run request from webview using SSE streaming.
+     * Each event is forwarded to the webview as it arrives so step cards
+     * update in real-time instead of waiting for the full loop to finish.
      */
     private async handleAutoRun(task: string) {
         if (!task) { return; }
+
+        // Show the user's /run message immediately
+        this.panel?.webview.postMessage({ type: 'userMessage', message: `/run ${task}` });
+        // Open a live streaming card in the webview
+        this.panel?.webview.postMessage({ type: 'streamRunStart', task });
+
+        const context = this.getCurrentContext();
+        const { url, token } = this.apiClient.getStreamConfig();
+
+        const body = JSON.stringify({
+            task,
+            session_id: this.sessionId,
+            context,
+        });
+
         try {
-            this.panel?.webview.postMessage({ type: 'loading', loading: true });
-            // Show the user what we're running
-            this.panel?.webview.postMessage({
-                type: 'userMessage',
-                message: `/run ${task}`
+            const response = await fetch(`${url}/chat/autorun/stream`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                    'Accept': 'text/event-stream',
+                },
+                body,
             });
 
-            const context = this.getCurrentContext();
-            const result = await this.apiClient.autoRun(task, this.sessionId, context);
-
-            // Update session ID if returned
-            if (result.session_id) {
-                this.sessionId = result.session_id;
+            if (!response.ok || !response.body) {
+                throw new Error(`SSE connect failed: ${response.status}`);
             }
 
-            // Send structured run result to webview renderer
-            this.panel?.webview.postMessage({
-                type: 'autoRunResult',
-                task: result.task,
-                steps: result.steps,
-                overallStatus: result.overall_status,
-                summary: result.summary,
-                executionResult: result.execution_result
-            });
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buf = '';
+
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) { break; }
+                buf += decoder.decode(value, { stream: true });
+
+                // SSE lines are separated by \n\n
+                const parts = buf.split('\n\n');
+                buf = parts.pop() ?? '';   // keep incomplete tail
+
+                for (const part of parts) {
+                    const line = part.trim();
+                    if (!line.startsWith('data:')) { continue; }
+                    const json = line.slice(5).trim();
+                    if (!json || json === '[DONE]') { continue; }
+                    try {
+                        const event = JSON.parse(json);
+                        // Forward every SSE event directly to the webview
+                        this.panel?.webview.postMessage({ type: 'streamEvent', event });
+                    } catch {
+                        // malformed chunk — skip
+                    }
+                }
+            }
         } catch (error: any) {
-            console.error('AutoRun failed:', error);
+            console.error('AutoRun stream failed:', error);
             this.panel?.webview.postMessage({
-                type: 'error',
-                message: `AutoRun failed: ${error.message}`
+                type: 'streamEvent',
+                event: { type: 'error', error: error.message }
             });
         } finally {
-            this.panel?.webview.postMessage({ type: 'loading', loading: false });
+            this.panel?.webview.postMessage({ type: 'streamRunDone' });
         }
     }
 

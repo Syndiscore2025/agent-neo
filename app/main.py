@@ -5,8 +5,9 @@ Production-ready remote execution agent.
 
 import os
 import logging
+import json
 from fastapi import FastAPI, HTTPException, Request, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -642,6 +643,40 @@ async def auto_run_task(
     except Exception as e:
         logger.error(f"AutoRun failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/chat/autorun/stream")
+async def auto_run_stream(
+    request: AutoRunRequest,
+    _: str = Depends(verify_bearer_token)
+):
+    """
+    Streaming version of /chat/autorun using Server-Sent Events (SSE).
+
+    Each event is a JSON line prefixed with 'data: ' per the SSE spec.
+    Event types: tool_start, tool_end, text, finish, commit, error.
+    """
+    orchestrator = get_orchestrator(engine)
+
+    async def generate():
+        try:
+            async for event in orchestrator.stream_auto_run(request):
+                payload = json.dumps(event, default=str)
+                yield f"data: {payload}\n\n"
+        except Exception as exc:
+            logger.error(f"SSE stream error: {exc}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
+        finally:
+            yield "data: {\"type\": \"done\"}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.delete("/chat/session")

@@ -614,6 +614,52 @@ class InteractiveOrchestrator:
             execution_result=result_card,
         )
 
+    async def stream_auto_run(self, request: AutoRunRequest):
+        """
+        Async generator — streams SSE-compatible dicts from AgentLoop.run_stream().
+        Yields dicts matching StreamEvent schema (type, tool, result, content, etc.)
+        """
+        from app.interactive.agent_loop import AgentLoop
+
+        session_id = request.session_id
+        if not session_id:
+            session_id = self.session_manager.create_session(request.context)
+        if not self.session_manager.get_session(session_id):
+            session_id = self.session_manager.create_session(request.context)
+
+        context = self.context_engine.gather_context(request.context)
+        # Inject diagnostics from request context into gathered context
+        if request.context and getattr(request.context, "diagnostics", None):
+            context["diagnostics"] = request.context.diagnostics
+
+        repo_path = getattr(self.engine, "repo_path", None) or os.getenv("REPO_PATH", ".")
+        agent = AgentLoop(model_router=self.model_router, repo_path=repo_path)
+
+        files_written: list[str] = []
+        try:
+            async for event in agent.run_stream(task=request.task, context=context):
+                if event.get("type") == "finish":
+                    files_written = event.get("files") or []
+                yield event
+        except Exception as exc:
+            logger.error(f"stream_auto_run error: {exc}", exc_info=True)
+            yield {"type": "error", "error": str(exc)}
+            return
+
+        # Commit whatever was written
+        if files_written:
+            card = self._commit_agent_changes(session_id, request.task,
+                                              type("_R", (), {"files_written": files_written,
+                                                              "success": True,
+                                                              "summary": ""})(),
+                                              repo_path)
+            if card and card.commit_sha:
+                yield {"type": "commit", "sha": card.commit_sha, "files": files_written}
+
+        self.session_manager.add_message(session_id, ChatMessage(
+            role="assistant", content=f"[AutoRun stream] {request.task}"
+        ))
+
     def _agent_result_to_steps(self, result, total_ms: int) -> list[AutoRunStep]:
         """Convert AgentLoop tool call log into AutoRunStep cards."""
         if not result.tool_calls:
