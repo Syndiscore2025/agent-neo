@@ -679,6 +679,53 @@ async def auto_run_stream(
     )
 
 
+@app.post("/chat/autorun/phased")
+async def auto_run_phased(
+    request: AutoRunRequest,
+    _: str = Depends(verify_bearer_token)
+):
+    """
+    Multi-phase agentic run using Server-Sent Events (SSE).
+
+    Flow: planning → phase_plan → (phase_start → tool events → phase_checkpoint → phase_end) × N → phased_done
+
+    Event types:
+      planning          — task is being decomposed by the planner
+      phase_plan        — full list of planned phases
+      phase_start       — a phase is beginning (phase_id, phase_name, specialist, phase_index, total_phases)
+      text              — streamed text token from the specialist LLM
+      tool_start        — specialist is calling a tool
+      tool_end          — tool result (includes path for write_file events)
+      finish            — specialist called finish for this phase
+      phase_checkpoint  — git commit SHA created after the phase
+      phase_verify      — output of checkpoint_cmd (if configured)
+      phase_end         — phase complete with summary
+      phased_done       — all phases finished
+      error             — something went wrong (non-fatal: run continues)
+    """
+    orchestrator = get_orchestrator(engine)
+
+    async def generate():
+        try:
+            async for event in orchestrator.stream_phased_run(request):
+                payload = json.dumps(event, default=str)
+                yield f"data: {payload}\n\n"
+        except Exception as exc:
+            logger.error(f"Phased SSE stream error: {exc}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
+        finally:
+            yield "data: {\"type\": \"done\"}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.delete("/chat/session")
 async def delete_chat_session(
     session_id: str,

@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Optional
 
-from app.interactive.tools import ToolExecutor, TOOL_SCHEMAS
+from app.interactive.tools import ToolExecutor, TOOL_SCHEMAS, get_filtered_schemas
 
 logger = logging.getLogger(__name__)
 
@@ -73,29 +73,38 @@ class AgentLoop:
         except Exception:
             return _BASE_SYSTEM
 
-    async def run(self, task: str, context: dict) -> AgentResult:
+    async def run(
+        self,
+        task: str,
+        context: dict,
+        system_override: Optional[str] = None,
+        tool_subset: Optional[list[str]] = None,
+        max_iterations_override: Optional[int] = None,
+    ) -> AgentResult:
         executor = ToolExecutor(self.repo_path)
         tool_calls_log: list[ToolCall] = []
-        system = self._build_system()
+        system = system_override or self._build_system()
+        tools = get_filtered_schemas(tool_subset) if tool_subset else TOOL_SCHEMAS
+        limit = max_iterations_override or MAX_ITERATIONS
 
         user_content = self._build_task_message(task, context)
         messages: list[dict] = [{"role": "user", "content": user_content}]
 
-        for iteration in range(MAX_ITERATIONS):
-            logger.info(f"AgentLoop iteration {iteration + 1}/{MAX_ITERATIONS}")
+        for iteration in range(limit):
+            logger.info(f"AgentLoop iteration {iteration + 1}/{limit}")
 
             try:
                 llm_resp = await self.model_router.generate_with_tools(
                     system=system,
                     messages=messages,
-                    tools=TOOL_SCHEMAS,
+                    tools=tools,
                     max_tokens=4096,
                 )
             except Exception as exc:
                 logger.error(f"LLM call failed at iteration {iteration}: {exc}")
                 return AgentResult(
                     success=False,
-                    summary=f"LLM error at iteration {iteration + 1}: {exc}",
+                    summary=f"LLM error at iteration {iteration + 1}/{limit}: {exc}",
                     tool_calls=tool_calls_log,
                     files_written=executor.files_written,
                     error=str(exc),
@@ -170,25 +179,34 @@ class AgentLoop:
 
         return AgentResult(
             success=False,
-            summary=f"Reached max iterations ({MAX_ITERATIONS}). Task may be incomplete.",
+            summary=f"Reached max iterations ({limit}). Task may be incomplete.",
             tool_calls=tool_calls_log,
             files_written=executor.files_written,
             error="max_iterations_exceeded",
         )
 
-    async def run_stream(self, task: str, context: dict) -> AsyncGenerator[dict, None]:
+    async def run_stream(
+        self,
+        task: str,
+        context: dict,
+        system_override: Optional[str] = None,
+        tool_subset: Optional[list[str]] = None,
+        max_iterations_override: Optional[int] = None,
+    ) -> AsyncGenerator[dict, None]:
         """
         Streaming ReAct loop — yields SSE-compatible dicts at each step.
         Compatible with StreamEvent schema in contracts.py.
         """
         executor = ToolExecutor(self.repo_path)
         tool_calls_log: list[ToolCall] = []
-        system = self._build_system()
+        system = system_override or self._build_system()
+        tools = get_filtered_schemas(tool_subset) if tool_subset else TOOL_SCHEMAS
+        limit = max_iterations_override or MAX_ITERATIONS
 
         user_content = self._build_task_message(task, context)
         messages: list[dict] = [{"role": "user", "content": user_content}]
 
-        for iteration in range(MAX_ITERATIONS):
+        for iteration in range(limit):
             pending_tool_calls: list[dict] = []  # {"id", "name", "input"}
             raw_content_blocks: list[dict] = []
             text_buf = ""
@@ -197,7 +215,7 @@ class AgentLoop:
             async for chunk in self.model_router.stream_with_tools(
                 system=system,
                 messages=messages,
-                tools=TOOL_SCHEMAS,
+                tools=tools,
                 max_tokens=4096,
             ):
                 ctype = chunk.get("type")
@@ -284,7 +302,7 @@ class AgentLoop:
             messages.append({"role": "user", "content": tool_results})
 
         yield {"type": "finish", "success": False,
-               "summary": f"Reached max iterations ({MAX_ITERATIONS}).",
+               "summary": f"Reached max iterations ({limit}).",
                "files": executor.files_written}
 
     # ── helpers ───────────────────────────────────────────────────────────────

@@ -668,6 +668,78 @@ class InteractiveOrchestrator:
             role="assistant", content=f"[AutoRun stream] {request.task}"
         ))
 
+    async def stream_phased_run(self, request: AutoRunRequest):
+        """
+        Async generator — runs a multi-phase agentic plan and streams SSE events.
+
+        Flow:
+          1. Emit 'planning' event
+          2. Call TaskPlanner → list of Phase objects
+          3. Emit 'phase_plan' event
+          4. Delegate to PhaseRunner which streams per-phase events
+          5. After all phases, emit final 'done' event
+        """
+        from app.interactive.planner import plan_task
+        from app.interactive.phase_runner import PhaseRunner
+
+        session_id = request.session_id
+        if not session_id:
+            session_id = self.session_manager.create_session(request.context)
+        if not self.session_manager.get_session(session_id):
+            session_id = self.session_manager.create_session(request.context)
+
+        context = self.context_engine.gather_context(request.context)
+        if request.context and getattr(request.context, "diagnostics", None):
+            context["diagnostics"] = request.context.diagnostics
+
+        repo_path = (
+            getattr(request.context, "workspace_path", None)
+            or getattr(self.engine, "repo_path", None)
+            or os.getenv("REPO_PATH", ".")
+        )
+
+        # ── 1. Planning ───────────────────────────────────────────────────────
+        yield {"type": "planning", "task": request.task}
+
+        try:
+            phases = await plan_task(
+                model_router=self.model_router,
+                task=request.task,
+                context=context,
+            )
+        except Exception as exc:
+            logger.error(f"Planner failed: {exc}", exc_info=True)
+            yield {"type": "error", "error": f"Planning failed: {exc}"}
+            return
+
+        # ── 2. Execute phases ─────────────────────────────────────────────────
+        runner = PhaseRunner(model_router=self.model_router, repo_path=repo_path)
+        files_written: list[str] = []
+
+        try:
+            async for event in runner.run_phases(
+                phases=phases, task=request.task, context=context
+            ):
+                if event.get("type") == "tool_end" and event.get("tool") == "write_file":
+                    if event.get("path"):
+                        files_written.append(event["path"])
+                yield event
+        except Exception as exc:
+            logger.error(f"PhaseRunner error: {exc}", exc_info=True)
+            yield {"type": "error", "error": str(exc)}
+            return
+
+        # ── 3. Final commit summary ───────────────────────────────────────────
+        self.session_manager.add_message(session_id, ChatMessage(
+            role="assistant",
+            content=f"[PhasedRun] {request.task} — {len(phases)} phase(s) complete",
+        ))
+        yield {
+            "type": "phased_done",
+            "total_phases": len(phases),
+            "files_written": files_written,
+        }
+
     def _agent_result_to_steps(self, result, total_ms: int) -> list[AutoRunStep]:
         """Convert AgentLoop tool call log into AutoRunStep cards."""
         if not result.tool_calls:

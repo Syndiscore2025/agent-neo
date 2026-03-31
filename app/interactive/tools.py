@@ -118,6 +118,12 @@ TOOL_SCHEMAS = [
 ]
 
 
+def get_filtered_schemas(tool_names: list[str]) -> list[dict]:
+    """Return only the TOOL_SCHEMAS entries for the named tools."""
+    names_set = set(tool_names)
+    return [s for s in TOOL_SCHEMAS if s["name"] in names_set]
+
+
 class ToolExecutor:
     """Executes agent tool calls against the real filesystem and shell."""
 
