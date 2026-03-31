@@ -62,6 +62,7 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     context: Optional[ChatContext] = None
     attachment_ids: Optional[List[str]] = Field(default_factory=list)
+    model: Optional[str] = None  # e.g. "claude-sonnet", "claude-opus", "gpt"
 
 
 class DiffProposal(BaseModel):
@@ -295,4 +296,50 @@ class DeleteIntegrationResponse(BaseModel):
     """Delete confirmation."""
     deleted: bool
     integration_id: str
+
+
+# ---------------------------------------------------------------------------
+# Workspace / Repo binding
+# ---------------------------------------------------------------------------
+
+class WorkspaceBindRequest(BaseModel):
+    """Request to clone a GitHub repo and bind it as the active workspace."""
+    integration_id: str = Field(..., description="ID of the GitHub integration stored in the registry")
+    owner: str
+    repo: str
+    branch: str = "main"
+
+
+class WorkspaceBindResponse(BaseModel):
+    """Result of a workspace bind operation."""
+    bound: bool
+    owner: str
+    repo: str
+    branch: str
+    workspace_path: str
+    file_count: int
+
+
+class WorkspaceStatusResponse(BaseModel):
+    """Current workspace binding status."""
+    bound: bool
+    owner: Optional[str] = None
+    repo: Optional[str] = None
+    branch: Optional[str] = None
+    workspace_path: Optional[str] = None
+    file_count: int = 0
+
+
+class WorkspaceCommitRequest(BaseModel):
+    """Request to commit and push changes from the active workspace."""
+    integration_id: str = Field(..., description="GitHub integration to use for authentication")
+    message: str = Field(..., description="Git commit message")
+
+
+class WorkspaceCommitResponse(BaseModel):
+    """Result of a commit+push operation."""
+    committed: bool
+    pushed: bool
+    sha: Optional[str] = None
+    message: str
 

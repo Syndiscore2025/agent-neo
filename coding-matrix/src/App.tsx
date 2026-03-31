@@ -1,14 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react';
 import Editor from '@monaco-editor/react';
 import {
   approveDiff,
   buildChatContext,
   fetchHealth,
+  getAvailableModels,
   rollbackLastChange,
   sendChatMessage,
   streamPhasedRun,
 } from './lib/agentNeo';
 import { fetchFile, fetchRepoTree, saveFile } from './lib/github';
+import { bindWorkspace, commitWorkspace, listRepos, type GitHubRepo } from './lib/workspace';
 import {
   createIntegration,
   deleteIntegration,
@@ -18,6 +20,7 @@ import {
 } from './lib/integrations';
 import { fetchDigitalOceanStatus, fetchRenderStatus, fetchVercelStatus } from './lib/services';
 import type {
+  ActivityItem,
   ChatMessageItem,
   IntegrationAuthType,
   IntegrationCatalogEntry,
@@ -322,7 +325,8 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [phases, setPhases] = useState<PhaseState[]>([]);
-  const [bottomTab, setBottomTab] = useState<'terminal' | 'deploy'>('terminal');
+  const [activityItems, setActivityItems] = useState<ActivityItem[]>([]);
+  const [bottomTab, setBottomTab] = useState<'terminal' | 'activity' | 'deploy'>('terminal');
   const [agentStatus, setAgentStatus] = useState<ServiceStatus>({ state: 'idle', message: 'Not checked yet' });
   const [deployStatus, setDeployStatus] = useState<ServiceStatus>({ state: 'idle', message: 'No deployment URL configured' });
   const [providerStatuses, setProviderStatuses] = useState<Record<string, ServiceStatus>>({});
@@ -335,6 +339,27 @@ function App() {
   const [serviceForm, setServiceForm] = useState<ServiceFormState>(() => createServiceForm([]));
   const [paneLayout, setPaneLayout] = useState<PaneLayout>(DEFAULT_LAYOUT);
   const [activeResizeHandle, setActiveResizeHandle] = useState<ResizeHandle | null>(null);
+
+  // Repo picker state
+  const [showRepoPicker, setShowRepoPicker] = useState(false);
+  const [repoList, setRepoList] = useState<GitHubRepo[]>([]);
+  const [repoPickerLoading, setRepoPickerLoading] = useState(false);
+  const [repoPickerError, setRepoPickerError] = useState<string>();
+  const [repoFilter, setRepoFilter] = useState('');
+
+  // Commit & Push state
+  const [showCommitDialog, setShowCommitDialog] = useState(false);
+  const [commitMessage, setCommitMessage] = useState('');
+  const [commitBusy, setCommitBusy] = useState(false);
+
+  // Model selector state
+  const [selectedModel, setSelectedModel] = useState('claude-sonnet');
+  const [availableModels, setAvailableModels] = useState<string[]>(['claude-sonnet', 'claude-opus', 'gpt']);
+
+  // Speech-to-text state
+  const [sttActive, setSttActive] = useState(false);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sttRef = useRef<any>(null);
 
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) ?? projects[0],
@@ -428,6 +453,7 @@ function App() {
     setSessionId(undefined);
     setLogs([`[${timestamp()}] Switched to ${activeProject.name}`]);
     setPhases([]);
+    setActivityItems([]);
     setProviderStatuses({});
   }, [activeProject.id, activeProject.name]);
 
@@ -561,6 +587,86 @@ function App() {
     setActiveProjectId(remaining[0].id);
   };
 
+  // ── Repo picker ──────────────────────────────────────────────────────────
+
+  const handleOpenRepoPicker = async () => {
+    if (!activeProject.serviceBindings.github?.trim()) {
+      setSidebarView('services');
+      appendLog('Bind a GitHub integration in Services before picking a repo.');
+      return;
+    }
+    setRepoPickerError(undefined);
+    setRepoFilter('');
+    setShowRepoPicker(true);
+    if (repoList.length === 0) {
+      setRepoPickerLoading(true);
+      try {
+        const repos = await listRepos(activeProject);
+        setRepoList(repos);
+      } catch (error) {
+        setRepoPickerError(error instanceof Error ? error.message : 'Failed to list repos.');
+      } finally {
+        setRepoPickerLoading(false);
+      }
+    }
+  };
+
+  const handleSelectRepo = async (ghRepo: GitHubRepo) => {
+    setShowRepoPicker(false);
+    const owner = ghRepo.owner.login;
+    const repo = ghRepo.name;
+    const branch = ghRepo.default_branch;
+
+    // Update project fields immediately
+    updateActiveProject({ githubOwner: owner, githubRepo: repo, branch });
+    appendLog(`Binding workspace: ${owner}/${repo} @ ${branch}…`);
+
+    // Bind workspace on backend (clone/pull)
+    try {
+      const result = await bindWorkspace(activeProject, owner, repo, branch);
+      appendLog(`Workspace ready: ${result.file_count} files cloned to server.`);
+    } catch (error) {
+      appendLog(`Workspace bind: ${error instanceof Error ? error.message : 'failed'} (file ops will use GitHub API instead)`);
+    }
+
+    // Load the file tree automatically
+    try {
+      setTreeLoading(true);
+      appendLog(`Loading file tree for ${owner}/${repo}…`);
+      const patchedProject = { ...activeProject, githubOwner: owner, githubRepo: repo, branch };
+      const response = await fetchRepoTree(patchedProject);
+      setTree(response.tree);
+      setExpanded({ src: true, app: true });
+      appendLog(`Loaded ${response.tree.length} top-level nodes.`);
+    } catch (error) {
+      appendLog(error instanceof Error ? error.message : 'Failed to load file tree.');
+    } finally {
+      setTreeLoading(false);
+    }
+  };
+
+  // ── Commit & Push ─────────────────────────────────────────────────────────
+
+  const handleCommitAndPush = async () => {
+    if (!commitMessage.trim()) return;
+    setCommitBusy(true);
+    try {
+      appendLog(`Committing: "${commitMessage}"…`);
+      const result = await commitWorkspace(activeProject, commitMessage.trim());
+      if (result.committed) {
+        appendLog(`✓ Pushed ${result.sha?.slice(0, 7) ?? ''} → ${activeProject.githubOwner}/${activeProject.githubRepo}@${activeProject.branch}`);
+      } else {
+        appendLog(`Nothing to commit — working tree clean.`);
+      }
+      setShowCommitDialog(false);
+      setCommitMessage('');
+    } catch (error) {
+      appendLog(`Commit failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setCommitBusy(false);
+    }
+  };
+
   const handleLoadTree = async () => {
     if (!activeProject.githubOwner.trim() || !activeProject.githubRepo.trim()) {
       appendLog('GitHub owner and repo are required before loading the file tree.');
@@ -662,6 +768,16 @@ function App() {
           state: 'error',
           message: error instanceof Error ? error.message : 'Agent NEO health check failed.',
         });
+      }
+      // Fetch available models
+      try {
+        const models = await getAvailableModels(activeProject);
+        if (models.length > 0) {
+          setAvailableModels(models);
+          if (!models.includes(selectedModel)) setSelectedModel(models[0]);
+        }
+      } catch {
+        // silently ignore — keep the default model list
       }
     } else {
       setAgentStatus({ state: 'idle', message: 'Configure Agent NEO URL + token' });
@@ -774,11 +890,18 @@ function App() {
     }
   };
 
+  // Unique counter for activity item IDs
+  const activityCounterRef = React.useRef(0);
+
   const handleRunTask = async (task: string) => {
-    setBottomTab('terminal');
+    setBottomTab('activity');
     setPhases([]);
+    setActivityItems([]);
     pushMessage({ role: 'user', content: `/run ${task}` });
     appendLog(`Starting phased run: ${task}`);
+
+    // Map tool_start events to pending activity items (keyed by tool name for matching)
+    const pendingByTool = new Map<string, string>(); // tool name → activity id
 
     try {
       setBusy(true);
@@ -806,10 +929,43 @@ function App() {
           appendLog(`Phase start: ${String(event.phase_name ?? event.phase_id)}`);
         }
         if (type === 'tool_start') {
-          appendLog(`Tool start: ${String(event.tool ?? 'unknown')}`);
+          const toolName = String(event.tool ?? 'unknown');
+          const itemId = `act-${++activityCounterRef.current}`;
+          pendingByTool.set(toolName, itemId);
+          const pending: ActivityItem = {
+            id: itemId,
+            tool: toolName,
+            path: event.path ? String(event.path) : undefined,
+            command: event.command ? String(event.command) : undefined,
+            query: event.query ? String(event.query) : undefined,
+            status: 'running',
+            timestamp: new Date().toISOString(),
+          };
+          setActivityItems((prev) => [pending, ...prev]);
+          appendLog(`→ ${toolName}${pending.path ? `: ${pending.path}` : pending.command ? `: ${pending.command}` : ''}`);
         }
         if (type === 'tool_end') {
-          appendLog(`Tool end: ${String(event.tool ?? 'unknown')}`);
+          const toolName = String(event.tool ?? 'unknown');
+          const itemId = pendingByTool.get(toolName);
+          pendingByTool.delete(toolName);
+          setActivityItems((prev) =>
+            prev.map((item) =>
+              item.id === itemId
+                ? {
+                    ...item,
+                    status: 'done' as const,
+                    path: event.path ? String(event.path) : item.path,
+                    command: event.command ? String(event.command) : item.command,
+                    query: event.query ? String(event.query) : item.query,
+                    linesRead: event.lines_read != null ? Number(event.lines_read) : item.linesRead,
+                    linesAdded: event.lines_added != null ? Number(event.lines_added) : item.linesAdded,
+                    linesRemoved: event.lines_removed != null ? Number(event.lines_removed) : item.linesRemoved,
+                    totalLines: event.total_lines != null ? Number(event.total_lines) : item.totalLines,
+                    durationMs: event.duration_ms != null ? Number(event.duration_ms) : item.durationMs,
+                  }
+                : item,
+            ),
+          );
         }
         if (type === 'phase_checkpoint') {
           setPhases((current) =>
@@ -907,6 +1063,7 @@ function App() {
         message,
         sessionId,
         buildChatContext(activeProject, activeFile),
+        selectedModel,
       );
       setSessionId(response.session_id);
       pushMessage({
@@ -1127,18 +1284,21 @@ function App() {
                   <input value={activeProject.name} onChange={(event) => updateActiveProject({ name: event.target.value })} />
                 </label>
                 <label>
-                  GitHub Owner
-                  <input
-                    value={activeProject.githubOwner}
-                    onChange={(event) => updateActiveProject({ githubOwner: event.target.value })}
-                  />
-                </label>
-                <label>
-                  GitHub Repo
-                  <input
-                    value={activeProject.githubRepo}
-                    onChange={(event) => updateActiveProject({ githubRepo: event.target.value })}
-                  />
+                  Repository
+                  <div className="repo-picker-row">
+                    <span className="repo-picker-value">
+                      {activeProject.githubOwner && activeProject.githubRepo
+                        ? `${activeProject.githubOwner}/${activeProject.githubRepo}`
+                        : 'Not selected'}
+                    </span>
+                    <button
+                      className="secondary-action compact"
+                      onClick={() => void handleOpenRepoPicker()}
+                      title="Pick a GitHub repository"
+                    >
+                      Pick Repo
+                    </button>
+                  </div>
                 </label>
                 <label>
                   Branch
@@ -1226,7 +1386,16 @@ function App() {
 
               <div className="panel-header secondary">
                 <span>Explorer</span>
-                <span className="title-subtle">{activeProject.githubOwner}/{activeProject.githubRepo}</span>
+                <div className="inline-actions">
+                  <span className="title-subtle">{activeProject.githubOwner}/{activeProject.githubRepo}</span>
+                  <button
+                    title="Commit & Push changes to GitHub"
+                    onClick={() => { setCommitMessage(''); setShowCommitDialog(true); }}
+                    disabled={!activeProject.serviceBindings.github?.trim()}
+                  >
+                    ↑ Push
+                  </button>
+                </div>
               </div>
 
               <div className="tree-container">
@@ -1510,21 +1679,75 @@ function App() {
         </div>
 
         <div className="chat-input-panel">
-          <div className="title-subtle">Commands: /run &lt;task&gt;, /rollback, /new, /help</div>
-          <textarea
-            value={chatInput}
-            onChange={(event) => setChatInput(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault();
-                void handleSend();
-              }
-            }}
-            placeholder="Ask Agent NEO anything…"
-          />
-          <button onClick={() => void handleSend()} disabled={busy}>
-            {busy ? 'Working…' : 'Send'}
-          </button>
+          <div className="chat-input-toolbar">
+            <span className="title-subtle">Commands: /run &lt;task&gt;, /rollback, /new, /help</span>
+            <div className="model-selector-wrap">
+              <label className="title-subtle" htmlFor="model-select">Model:</label>
+              <select
+                id="model-select"
+                className="model-select"
+                value={selectedModel}
+                onChange={(e) => setSelectedModel(e.target.value)}
+              >
+                {availableModels.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          <div className="chat-input-row">
+            <button
+              className={`mic-btn${sttActive ? ' mic-active' : ''}`}
+              title={sttActive ? 'Recording… click to stop' : 'Speak your message (Speech-to-Text)'}
+              onClick={() => {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const w = window as any;
+                const SpeechRecognitionCtor = w.SpeechRecognition || w.webkitSpeechRecognition;
+                if (!SpeechRecognitionCtor) return;
+
+                if (sttActive && sttRef.current) {
+                  sttRef.current.stop();
+                  return;
+                }
+
+                const rec = new SpeechRecognitionCtor();
+                rec.continuous = false;
+                rec.interimResults = true;
+                rec.lang = 'en-US';
+
+                rec.onstart = () => setSttActive(true);
+                rec.onend = () => setSttActive(false);
+                rec.onerror = () => setSttActive(false);
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                rec.onresult = (event: any) => {
+                  let transcript = '';
+                  for (let i = event.resultIndex; i < event.results.length; i++) {
+                    transcript += event.results[i][0].transcript;
+                  }
+                  setChatInput(transcript);
+                };
+
+                sttRef.current = rec;
+                rec.start();
+              }}
+            >
+              {sttActive ? '🔴' : '🎤'}
+            </button>
+            <textarea
+              value={chatInput}
+              onChange={(event) => setChatInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault();
+                  void handleSend();
+                }
+              }}
+              placeholder="Ask Agent NEO anything…"
+            />
+            <button onClick={() => void handleSend()} disabled={busy}>
+              {busy ? 'Working…' : 'Send'}
+            </button>
+          </div>
         </div>
       </section>
 
@@ -1534,19 +1757,86 @@ function App() {
             <button className={bottomTab === 'terminal' ? 'active' : ''} onClick={() => setBottomTab('terminal')}>
               Terminal
             </button>
+            <button className={`activity-tab-btn ${bottomTab === 'activity' ? 'active' : ''}`} onClick={() => setBottomTab('activity')}>
+              Live Activity {activityItems.length > 0 && <span className="activity-count">{activityItems.length}</span>}
+            </button>
             <button className={bottomTab === 'deploy' ? 'active' : ''} onClick={() => setBottomTab('deploy')}>
               Deploy / Health
             </button>
           </div>
         </div>
 
-        {bottomTab === 'terminal' ? (
+        {bottomTab === 'terminal' && (
           <div className="terminal-log">
             {logs.map((entry, index) => (
               <div key={`${entry}-${index}`}>{entry}</div>
             ))}
           </div>
-        ) : (
+        )}
+
+        {bottomTab === 'activity' && (
+          <div className="activity-feed">
+            {activityItems.length === 0 && (
+              <div className="activity-empty">No activity yet — run a task to see live file operations here.</div>
+            )}
+            {activityItems.map((item) => {
+              const isWrite = item.tool === 'write_file';
+              const isRead = item.tool === 'read_file';
+              const isCmd = item.tool === 'run_command';
+              const isList = item.tool === 'list_dir';
+              const isSearch = item.tool === 'search_code' || item.tool === 'semantic_search';
+              let icon = '⚙';
+              if (isWrite) icon = '✏';
+              else if (isRead) icon = '📖';
+              else if (isCmd) icon = '▶';
+              else if (isList) icon = '📁';
+              else if (isSearch) icon = '🔍';
+              else if (item.tool === 'finish') icon = '✅';
+              const label = isCmd
+                ? (item.command ?? item.tool)
+                : isSearch
+                ? `${item.tool === 'semantic_search' ? 'Semantic' : 'Search'}: ${item.query ?? ''}`
+                : item.path ?? item.tool;
+              const fileName = item.path ? item.path.split(/[\\/]/).pop() : undefined;
+              const dirPath = item.path && fileName ? item.path.slice(0, item.path.length - fileName.length).replace(/[\\/]$/, '') : undefined;
+              return (
+                <div key={item.id} className={`activity-item ${item.status} ${item.tool.replace('_', '-')}`}>
+                  <span className="activity-icon">{icon}</span>
+                  <span className="activity-label" title={label}>
+                    {fileName ? (
+                      <>
+                        <span className="activity-filename">{fileName}</span>
+                        {dirPath && <span className="activity-dir"> {dirPath}</span>}
+                      </>
+                    ) : (
+                      <span className="activity-filename">{label}</span>
+                    )}
+                  </span>
+                  <span className="activity-badges">
+                    {isRead && item.linesRead != null && (
+                      <span className="badge badge-read">+{item.linesRead} lines read</span>
+                    )}
+                    {isWrite && item.linesAdded != null && item.linesAdded > 0 && (
+                      <span className="badge badge-add">+{item.linesAdded}</span>
+                    )}
+                    {isWrite && item.linesRemoved != null && item.linesRemoved > 0 && (
+                      <span className="badge badge-del">−{item.linesRemoved}</span>
+                    )}
+                    {isWrite && item.totalLines != null && (
+                      <span className="badge badge-total">{item.totalLines} lines</span>
+                    )}
+                  </span>
+                  {item.status === 'running' && <span className="activity-spinner" />}
+                  {item.durationMs != null && item.status === 'done' && (
+                    <span className="activity-dur">{item.durationMs}ms</span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {bottomTab === 'deploy' && (
           <div className="deploy-grid">
             <div className={`status-card ${agentStatus.state}`}>
               <div className="status-title">Agent NEO</div>
@@ -1578,6 +1868,91 @@ function App() {
           </div>
         )}
       </section>
+
+      {/* ── Repo Picker Modal ─────────────────────────────────────────── */}
+      {showRepoPicker && (
+        <div className="modal-overlay" onClick={() => setShowRepoPicker(false)}>
+          <div className="modal-panel" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <span>Pick a GitHub Repository</span>
+              <button className="modal-close" onClick={() => setShowRepoPicker(false)}>✕</button>
+            </div>
+
+            <input
+              className="modal-search"
+              placeholder="Filter repos…"
+              value={repoFilter}
+              onChange={(e) => setRepoFilter(e.target.value)}
+              autoFocus
+            />
+
+            <div className="modal-body">
+              {repoPickerLoading && <div className="empty-state small">Loading repositories…</div>}
+              {repoPickerError && <div className="inline-note error">{repoPickerError}</div>}
+              {!repoPickerLoading && !repoPickerError && repoList.length === 0 && (
+                <div className="empty-state small">No repositories found.</div>
+              )}
+              {repoList
+                .filter((r) => r.full_name.toLowerCase().includes(repoFilter.toLowerCase()))
+                .map((r) => (
+                  <button
+                    key={r.id}
+                    className="repo-item"
+                    onClick={() => void handleSelectRepo(r)}
+                  >
+                    <span className="repo-name">{r.full_name}</span>
+                    <span className="repo-meta">
+                      {r.private ? '🔒' : '🌐'} {r.default_branch}
+                      {r.description ? ` · ${r.description.slice(0, 60)}` : ''}
+                    </span>
+                  </button>
+                ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Commit & Push Dialog ───────────────────────────────────────── */}
+      {showCommitDialog && (
+        <div className="modal-overlay" onClick={() => setShowCommitDialog(false)}>
+          <div className="modal-panel compact" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <span>Commit &amp; Push to GitHub</span>
+              <button className="modal-close" onClick={() => setShowCommitDialog(false)}>✕</button>
+            </div>
+
+            <div className="modal-body">
+              <label className="commit-label">
+                Commit message
+                <textarea
+                  className="commit-message"
+                  rows={3}
+                  value={commitMessage}
+                  onChange={(e) => setCommitMessage(e.target.value)}
+                  placeholder="Describe the changes…"
+                  autoFocus
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void handleCommitAndPush();
+                  }}
+                />
+              </label>
+
+              <div className="modal-actions">
+                <button
+                  className="primary-action"
+                  onClick={() => void handleCommitAndPush()}
+                  disabled={commitBusy || !commitMessage.trim()}
+                >
+                  {commitBusy ? 'Pushing…' : '↑ Commit & Push'}
+                </button>
+                <button className="secondary-action" onClick={() => setShowCommitDialog(false)}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <footer className="status-bar">
         <span>{activeProject.githubOwner}/{activeProject.githubRepo}</span>

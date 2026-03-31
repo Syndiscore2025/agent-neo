@@ -122,10 +122,14 @@ class InteractiveOrchestrator:
             attachment_context=attachment_context,
         )
 
-        # Generate model response
-        logger.info(f"Generating response for session {session_id} (intent: {intent})")
+        # Generate model response — honour user's model preference if supplied
+        selected_model = None
+        if getattr(request, "model", None):
+            selected_model = self.model_router.select_model(user_preference=request.model)
+        logger.info(f"Generating response for session {session_id} (intent: {intent}, model: {selected_model})")
         model_response = await self.model_router.generate_response(
             prompt=enriched_prompt,
+            model=selected_model,
             max_tokens=4000
         )
 

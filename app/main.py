@@ -7,6 +7,10 @@ import os
 import logging
 import json
 import httpx
+from dotenv import load_dotenv
+
+# Load .env early so os.getenv() picks up AGENT_NEO_TOKEN and all other vars
+load_dotenv()
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from contextlib import asynccontextmanager
@@ -49,6 +53,11 @@ from app.interactive.contracts import (
     IntegrationSummary,
     IntegrationsListResponse,
     IntegrationUpsertRequest,
+    WorkspaceBindRequest,
+    WorkspaceBindResponse,
+    WorkspaceStatusResponse,
+    WorkspaceCommitRequest,
+    WorkspaceCommitResponse,
 )
 from app.interactive.orchestrator import get_orchestrator
 from app.interactive.session_manager import get_session_manager
@@ -641,8 +650,101 @@ async def proxy_integration_request(
 
 
 # ============================================================================
+# WORKSPACE ENDPOINTS
+# ============================================================================
+
+@app.get("/workspace/status", response_model=WorkspaceStatusResponse)
+async def workspace_status(_: str = Depends(verify_bearer_token)):
+    """Return the currently-bound workspace (if any)."""
+    from app.modules.workspace_manager import get_workspace_state
+    state = get_workspace_state()
+    return WorkspaceStatusResponse(
+        bound=state.bound,
+        owner=state.owner or None,
+        repo=state.repo or None,
+        branch=state.branch or None,
+        workspace_path=state.workspace_path or None,
+        file_count=state.file_count,
+    )
+
+
+@app.post("/workspace/bind", response_model=WorkspaceBindResponse)
+async def workspace_bind(request: WorkspaceBindRequest, _: str = Depends(verify_bearer_token)):
+    """
+    Clone (or pull) a GitHub repo and bind it as the active agent workspace.
+
+    The integration must be a stored GitHub integration with a PAT secret.
+    After binding, the workspace path is used by the agent's file tools.
+    """
+    registry = get_integration_registry()
+    integration = registry.get_raw_integration(request.integration_id)
+    if not integration:
+        raise HTTPException(status_code=404, detail="GitHub integration not found")
+
+    token = (integration.get("secret") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="GitHub integration has no secret/PAT configured")
+
+    try:
+        from app.modules.workspace_manager import bind_workspace
+        state = bind_workspace(
+            owner=request.owner,
+            repo=request.repo,
+            branch=request.branch,
+            token=token,
+            integration_id=request.integration_id,
+        )
+    except RuntimeError as exc:
+        logger.error(f"Workspace bind failed: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return WorkspaceBindResponse(
+        bound=state.bound,
+        owner=state.owner,
+        repo=state.repo,
+        branch=state.branch,
+        workspace_path=state.workspace_path,
+        file_count=state.file_count,
+    )
+
+
+@app.post("/workspace/commit", response_model=WorkspaceCommitResponse)
+async def workspace_commit(request: WorkspaceCommitRequest, _: str = Depends(verify_bearer_token)):
+    """
+    Stage all changes in the bound workspace, commit, and push to GitHub.
+
+    Requires a bound workspace (call /workspace/bind first).
+    """
+    registry = get_integration_registry()
+    integration = registry.get_raw_integration(request.integration_id)
+    if not integration:
+        raise HTTPException(status_code=404, detail="GitHub integration not found")
+
+    token = (integration.get("secret") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="GitHub integration has no secret/PAT configured")
+
+    try:
+        from app.modules.workspace_manager import commit_and_push
+        result = commit_and_push(message=request.message, token=token)
+    except RuntimeError as exc:
+        logger.error(f"Workspace commit failed: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return WorkspaceCommitResponse(**result)
+
+
+# ============================================================================
 # INTERACTIVE ENDPOINTS
 # ============================================================================
+
+@app.get("/models")
+async def list_models(_: str = Depends(verify_bearer_token)):
+    """Return the list of available/configured LLM models."""
+    from app.interactive.model_router import get_model_router
+    router = get_model_router()
+    return {"models": router.get_available_models()}
+
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(

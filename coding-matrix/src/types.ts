@@ -151,3 +151,18 @@ export interface ServiceStatus {
   message: string;
   details?: string;
 }
+
+export interface ActivityItem {
+  id: string;
+  tool: string;
+  path?: string;
+  command?: string;
+  query?: string;
+  linesRead?: number;
+  linesAdded?: number;
+  linesRemoved?: number;
+  totalLines?: number;
+  durationMs?: number;
+  status: 'running' | 'done';
+  timestamp: string;
+}

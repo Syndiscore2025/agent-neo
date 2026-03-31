@@ -4,9 +4,11 @@ Tool-calling agent that mirrors Augment's flow:
   observe → think → act (tool) → observe → … → finish
 """
 import asyncio
+import difflib
 import logging
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
 from app.interactive.tools import ToolExecutor, TOOL_SCHEMAS, get_filtered_schemas
@@ -225,11 +227,24 @@ class AgentLoop:
                 elif ctype == "tool_start":
                     yield {"type": "tool_start", "tool": chunk["tool"]}
                 elif ctype == "tool_ready":
-                    pending_tool_calls.append({
+                    tc_info = {
                         "id": chunk["id"],
                         "name": chunk["tool"],
                         "input": chunk["input"],
-                    })
+                    }
+                    pending_tool_calls.append(tc_info)
+                    # Emit a richer tool_start now that we have the full input
+                    rich_start: dict = {"type": "tool_start", "tool": chunk["tool"]}
+                    inp = chunk["input"]
+                    if chunk["tool"] in ("read_file", "write_file", "list_dir"):
+                        if inp.get("path"):
+                            rich_start["path"] = inp["path"].lstrip("/\\")
+                    elif chunk["tool"] == "run_command":
+                        if inp.get("command"):
+                            rich_start["command"] = inp["command"]
+                    elif chunk["tool"] in ("search_code", "semantic_search"):
+                        rich_start["query"] = inp.get("pattern") or inp.get("query", "")
+                    yield rich_start
                 elif ctype == "error":
                     yield {"type": "error", "error": chunk["error"]}
                     return
@@ -258,6 +273,17 @@ class AgentLoop:
             finish_calls = [tc for tc in pending_tool_calls if tc["name"] == "finish"]
             exec_calls = [tc for tc in pending_tool_calls if tc["name"] != "finish"]
 
+            # Pre-execution: snapshot old file content for write_file diffs
+            pre_content: dict[str, str] = {}
+            for tc in exec_calls:
+                if tc["name"] == "write_file" and tc["input"].get("path"):
+                    rel = tc["input"]["path"].lstrip("/\\")
+                    old_path = executor.repo_path / rel
+                    try:
+                        pre_content[tc["id"]] = old_path.read_text(encoding="utf-8", errors="replace") if old_path.exists() else ""
+                    except Exception:
+                        pre_content[tc["id"]] = ""
+
             t0 = time.monotonic()
             if exec_calls:
                 loop = asyncio.get_event_loop()
@@ -282,9 +308,32 @@ class AgentLoop:
                     "result": result_text[:400],
                     "duration_ms": dur_each,
                 }
-                # For write_file, include the path so the extension can open it
-                if tc["name"] == "write_file" and tc["input"].get("path"):
-                    event["path"] = tc["input"]["path"].lstrip("/\\")
+                inp = tc["input"]
+                if tc["name"] == "write_file" and inp.get("path"):
+                    rel = inp["path"].lstrip("/\\")
+                    event["path"] = rel
+                    new_content = inp.get("content", "")
+                    old_content = pre_content.get(tc["id"], "")
+                    old_lines = old_content.splitlines()
+                    new_lines = new_content.splitlines()
+                    added = removed = 0
+                    for line in difflib.unified_diff(old_lines, new_lines):
+                        if line.startswith("+") and not line.startswith("+++"):
+                            added += 1
+                        elif line.startswith("-") and not line.startswith("---"):
+                            removed += 1
+                    event["lines_added"] = added
+                    event["lines_removed"] = removed
+                    event["total_lines"] = len(new_lines)
+                elif tc["name"] == "read_file" and inp.get("path"):
+                    event["path"] = inp["path"].lstrip("/\\")
+                    event["lines_read"] = len(result_text.splitlines())
+                elif tc["name"] == "run_command" and inp.get("command"):
+                    event["command"] = inp["command"]
+                elif tc["name"] == "list_dir":
+                    event["path"] = inp.get("path", ".").lstrip("/\\") or "."
+                elif tc["name"] in ("search_code", "semantic_search"):
+                    event["query"] = inp.get("pattern") or inp.get("query", "")
                 yield event
 
             for tc in finish_calls:
