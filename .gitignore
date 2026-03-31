@@ -47,6 +47,15 @@ htmlcov/
 *.log
 logs/
 
+# Dev scratch / debug output files
+backend-*.txt
+build-*.txt
+tsc-*.txt
+git-*.txt
+last-*.txt
+post-*.txt
+pytest-*.txt
+
 # OS
 .DS_Store
 Thumbs.db

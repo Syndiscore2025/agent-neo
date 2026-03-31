@@ -100,7 +100,18 @@ async def lifespan(app: FastAPI):
         # Don't require remote in cloud deployments
         is_cloud = os.path.exists("/workspace") or os.getenv("DYNO") or os.getenv("RENDER")
         require_remote = os.getenv("REQUIRE_REMOTE", "false" if is_cloud else "true").lower() == "true"
-        validate_git_state(repo_path, require_remote=require_remote)
+        # REQUIRE_CLEAN=false lets local dev start with a dirty working tree
+        require_clean = os.getenv("REQUIRE_CLEAN", "true").lower() == "true"
+        if require_clean:
+            validate_git_state(repo_path, require_remote=require_remote)
+        else:
+            # Lightweight check: repo exists and is on main
+            from app.modules.git_guard import get_current_branch, is_detached_head
+            branch = get_current_branch(repo_path)
+            if branch != "main":
+                raise GitGuardError(f"Not on main branch. Current branch: {branch}")
+            if is_detached_head(repo_path):
+                raise GitGuardError("Repository is in detached HEAD state")
         logger.info("Git state validated successfully")
     except GitGuardError as e:
         logger.warning(f"Git state validation failed: {e}")
