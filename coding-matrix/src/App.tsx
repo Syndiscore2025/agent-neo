@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react';
 import Editor from '@monaco-editor/react';
 import {
   approveDiff,
@@ -63,6 +63,13 @@ const PROVIDER_LABELS: Record<string, string> = {
 };
 
 type SidebarView = 'explorer' | 'services';
+type ResizeHandle = 'chat' | 'sidebar' | 'bottom';
+
+interface PaneLayout {
+  chatWidth: number;
+  sidebarWidth: number;
+  bottomHeight: number;
+}
 
 interface ServiceFormState {
   provider: string;
@@ -95,6 +102,28 @@ const DEPLOYMENT_TARGET_FIELDS = [
   },
 ] as const;
 
+const DEFAULT_LAYOUT: PaneLayout = {
+  chatWidth: 420,
+  sidebarWidth: 320,
+  bottomHeight: 230,
+};
+
+const ACTIVITY_BAR_WIDTH = 52;
+const TITLE_BAR_HEIGHT = 42;
+const STATUS_BAR_HEIGHT = 24;
+const SPLITTER_SIZE = 6;
+const MIN_CHAT_WIDTH = 280;
+const MIN_EDITOR_WIDTH = 420;
+const MIN_SIDEBAR_WIDTH = 280;
+const MIN_WORKSPACE_HEIGHT = 280;
+const MIN_BOTTOM_HEIGHT = 160;
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), Math.max(min, max));
+}
+
+const ENV_TOKEN = import.meta.env.VITE_AGENT_NEO_TOKEN?.trim() ?? '';
+
 function createProject(overrides: Partial<ProjectConfig> = {}): ProjectConfig {
   return {
     id: crypto.randomUUID(),
@@ -103,7 +132,7 @@ function createProject(overrides: Partial<ProjectConfig> = {}): ProjectConfig {
     githubRepo: 'agent-neo',
     branch: 'main',
     agentNeoUrl: '/api/backend',
-    agentNeoToken: '',
+    agentNeoToken: ENV_TOKEN,
     deploymentHealthUrl: '',
     serviceBindings: {},
     deploymentTargets: {},
@@ -139,7 +168,7 @@ function normalizeProjectConfig(input: Partial<ProjectConfig> & { githubToken?: 
     githubRepo: typeof input.githubRepo === 'string' ? input.githubRepo : 'agent-neo',
     branch: typeof input.branch === 'string' ? input.branch : 'main',
     agentNeoUrl: typeof input.agentNeoUrl === 'string' && input.agentNeoUrl.trim() ? input.agentNeoUrl : '/api/backend',
-    agentNeoToken: typeof input.agentNeoToken === 'string' ? input.agentNeoToken : '',
+    agentNeoToken: typeof input.agentNeoToken === 'string' && input.agentNeoToken.trim() ? input.agentNeoToken : ENV_TOKEN,
     deploymentHealthUrl: typeof input.deploymentHealthUrl === 'string' ? input.deploymentHealthUrl : '',
     serviceBindings,
     deploymentTargets,
@@ -276,6 +305,7 @@ function TreeView({
 }
 
 function App() {
+  const shellRef = useRef<HTMLDivElement>(null);
   const [projects, setProjects] = useState<ProjectConfig[]>(loadProjects);
   const [activeProjectId, setActiveProjectId] = useState<string>(() => {
     return localStorage.getItem(ACTIVE_PROJECT_KEY) ?? loadProjects()[0].id;
@@ -303,6 +333,8 @@ function App() {
   const [servicesError, setServicesError] = useState<string>();
   const [selectedIntegrationId, setSelectedIntegrationId] = useState<string>('new');
   const [serviceForm, setServiceForm] = useState<ServiceFormState>(() => createServiceForm([]));
+  const [paneLayout, setPaneLayout] = useState<PaneLayout>(DEFAULT_LAYOUT);
+  const [activeResizeHandle, setActiveResizeHandle] = useState<ResizeHandle | null>(null);
 
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) ?? projects[0],
@@ -347,6 +379,16 @@ function App() {
     [activeProject.serviceBindings],
   );
 
+  const shellStyle = useMemo(
+    () =>
+      ({
+        '--chat-width': `${paneLayout.chatWidth}px`,
+        '--sidebar-width': `${paneLayout.sidebarWidth}px`,
+        '--bottom-height': `${paneLayout.bottomHeight}px`,
+      }) as CSSProperties,
+    [paneLayout.bottomHeight, paneLayout.chatWidth, paneLayout.sidebarWidth],
+  );
+
   const deployProviderCards = useMemo(
     () => [
       {
@@ -388,6 +430,54 @@ function App() {
     setPhases([]);
     setProviderStatuses({});
   }, [activeProject.id, activeProject.name]);
+
+  useEffect(() => {
+    if (!activeResizeHandle) {
+      return undefined;
+    }
+
+    const handleMouseMove = (event: MouseEvent) => {
+      const shell = shellRef.current;
+      if (!shell) {
+        return;
+      }
+
+      const rect = shell.getBoundingClientRect();
+      setPaneLayout((current) => {
+        if (activeResizeHandle === 'chat') {
+          const maxChatWidth = rect.width - ACTIVITY_BAR_WIDTH - (SPLITTER_SIZE * 2) - current.sidebarWidth - MIN_EDITOR_WIDTH;
+          const nextChatWidth = clamp(event.clientX - rect.left - ACTIVITY_BAR_WIDTH, MIN_CHAT_WIDTH, maxChatWidth);
+          return nextChatWidth === current.chatWidth ? current : { ...current, chatWidth: nextChatWidth };
+        }
+
+        if (activeResizeHandle === 'sidebar') {
+          const maxSidebarWidth = rect.width - ACTIVITY_BAR_WIDTH - (SPLITTER_SIZE * 2) - current.chatWidth - MIN_EDITOR_WIDTH;
+          const nextSidebarWidth = clamp(rect.right - event.clientX, MIN_SIDEBAR_WIDTH, maxSidebarWidth);
+          return nextSidebarWidth === current.sidebarWidth ? current : { ...current, sidebarWidth: nextSidebarWidth };
+        }
+
+        const maxBottomHeight = rect.height - TITLE_BAR_HEIGHT - STATUS_BAR_HEIGHT - SPLITTER_SIZE - MIN_WORKSPACE_HEIGHT;
+        const nextBottomHeight = clamp(rect.bottom - STATUS_BAR_HEIGHT - event.clientY, MIN_BOTTOM_HEIGHT, maxBottomHeight);
+        return nextBottomHeight === current.bottomHeight ? current : { ...current, bottomHeight: nextBottomHeight };
+      });
+    };
+
+    const handleMouseUp = () => setActiveResizeHandle(null);
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    window.addEventListener('blur', handleMouseUp);
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = activeResizeHandle === 'bottom' ? 'row-resize' : 'col-resize';
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('blur', handleMouseUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+  }, [activeResizeHandle]);
 
   const loadServices = useCallback(
     async (preferredIntegrationId?: string) => {
@@ -862,6 +952,14 @@ function App() {
     appendLog(`${providerLabel(provider, integrationCatalog)} binding ${integrationId ? 'updated' : 'cleared'} for ${activeProject.name}.`);
   };
 
+  const handleResizeStart = useCallback(
+    (handle: ResizeHandle) => (event: ReactMouseEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      setActiveResizeHandle(handle);
+    },
+    [],
+  );
+
   const handleSaveIntegration = async () => {
     try {
       const parsedHeaders = serviceForm.headersJson.trim() ? JSON.parse(serviceForm.headersJson) : {};
@@ -937,7 +1035,7 @@ function App() {
   };
 
   return (
-    <div className="matrix-shell">
+    <div className={`matrix-shell ${activeResizeHandle ? 'is-resizing' : ''}`} ref={shellRef} style={shellStyle}>
       <aside className="activity-bar">
         <div className="activity-logo">CM</div>
         <button
@@ -978,6 +1076,30 @@ function App() {
           <button onClick={() => void refreshStatus()}>Refresh Status</button>
         </div>
       </header>
+
+      <div
+        className={`pane-resizer vertical chat-resizer ${activeResizeHandle === 'chat' ? 'active' : ''}`}
+        role="separator"
+        aria-label="Resize chat panel"
+        aria-orientation="vertical"
+        onMouseDown={handleResizeStart('chat')}
+      />
+
+      <div
+        className={`pane-resizer vertical sidebar-resizer ${activeResizeHandle === 'sidebar' ? 'active' : ''}`}
+        role="separator"
+        aria-label="Resize sidebar panel"
+        aria-orientation="vertical"
+        onMouseDown={handleResizeStart('sidebar')}
+      />
+
+      <div
+        className={`pane-resizer horizontal bottom-resizer ${activeResizeHandle === 'bottom' ? 'active' : ''}`}
+        role="separator"
+        aria-label="Resize bottom panel"
+        aria-orientation="horizontal"
+        onMouseDown={handleResizeStart('bottom')}
+      />
 
       <section className="sidebar explorer-panel">
         {sidebarView === 'explorer' ? (
@@ -1326,7 +1448,7 @@ function App() {
             <div className="empty-state">
               <h2>Welcome to Coding Matrix</h2>
               <p>Pick an MVP, load a GitHub repo, and open a file to start editing.</p>
-              <p>Use the right chat panel to ask Agent NEO for diffs or phased `/run` tasks.</p>
+              <p>Use the left chat panel to ask Agent NEO for diffs or phased `/run` tasks.</p>
             </div>
           )}
         </div>
