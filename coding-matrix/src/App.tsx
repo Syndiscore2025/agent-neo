@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from 'react';
 import Editor from '@monaco-editor/react';
 import {
   approveDiff,
@@ -891,7 +891,7 @@ function App() {
   };
 
   // Unique counter for activity item IDs
-  const activityCounterRef = React.useRef(0);
+  const activityCounterRef = useRef(0);
 
   const handleRunTask = async (task: string) => {
     setBottomTab('activity');
