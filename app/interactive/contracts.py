@@ -239,3 +239,60 @@ class StreamEvent(BaseModel):
     files: Optional[List[str]] = None
     error: Optional[str] = None
 
+
+# ---------------------------------------------------------------------------
+# Integrations registry / proxy
+# ---------------------------------------------------------------------------
+class IntegrationCatalogEntry(BaseModel):
+    """Built-in service preset surfaced to the Coding Matrix UI."""
+    provider: str
+    label: str
+    description: str
+    default_base_url: Optional[str] = None
+    default_auth_type: Literal["bearer", "x-api-key", "custom_header", "none"] = "bearer"
+    default_auth_header: str = "Authorization"
+    default_auth_scheme: Optional[str] = "Bearer"
+
+
+class IntegrationUpsertRequest(BaseModel):
+    """Create or update a stored integration secret/config."""
+    provider: str = Field(..., min_length=1)
+    label: str = Field(..., min_length=1)
+    base_url: Optional[str] = None
+    auth_type: Literal["bearer", "x-api-key", "custom_header", "none"] = "bearer"
+    auth_header: str = "Authorization"
+    auth_scheme: Optional[str] = "Bearer"
+    secret: Optional[str] = None
+    clear_secret: bool = False
+    headers: Dict[str, str] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    description: Optional[str] = None
+
+
+class IntegrationSummary(BaseModel):
+    """Sanitized integration record returned to the browser."""
+    id: str
+    provider: str
+    label: str
+    base_url: Optional[str] = None
+    auth_type: Literal["bearer", "x-api-key", "custom_header", "none"] = "bearer"
+    auth_header: str = "Authorization"
+    auth_scheme: Optional[str] = "Bearer"
+    headers: Dict[str, str] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    description: Optional[str] = None
+    secret_configured: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+class IntegrationsListResponse(BaseModel):
+    """Collection wrapper for stored integrations."""
+    integrations: List[IntegrationSummary] = Field(default_factory=list)
+
+
+class DeleteIntegrationResponse(BaseModel):
+    """Delete confirmation."""
+    deleted: bool
+    integration_id: str
+

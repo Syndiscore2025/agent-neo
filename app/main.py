@@ -6,8 +6,9 @@ Production-ready remote execution agent.
 import os
 import logging
 import json
+import httpx
 from fastapi import FastAPI, HTTPException, Request, Depends
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -43,12 +44,18 @@ from app.interactive.contracts import (
     RollbackResponse,
     AutoRunRequest,
     AutoRunResponse,
+    DeleteIntegrationResponse,
+    IntegrationCatalogEntry,
+    IntegrationSummary,
+    IntegrationsListResponse,
+    IntegrationUpsertRequest,
 )
 from app.interactive.orchestrator import get_orchestrator
 from app.interactive.session_manager import get_session_manager
 from app.interactive.completion_service import get_completion_service
 from app.interactive.attachment_handler import get_attachment_handler
 from app.interactive.suggestion_engine import get_suggestion_engine
+from app.integrations_registry import get_integration_registry
 
 
 # Configure logging
@@ -512,6 +519,117 @@ async def apply_calibration(request: CalibrationApplyRequest, token: str = Depen
 
 
 # ============================================================================
+# INTEGRATIONS REGISTRY / PROXY ENDPOINTS
+# ============================================================================
+
+@app.get("/integrations/catalog", response_model=list[IntegrationCatalogEntry])
+async def get_integrations_catalog(_: str = Depends(verify_bearer_token)):
+    """Return built-in service presets for the Coding Matrix UI."""
+    registry = get_integration_registry()
+    return registry.list_catalog()
+
+
+@app.get("/integrations", response_model=IntegrationsListResponse)
+async def list_integrations(_: str = Depends(verify_bearer_token)):
+    """List sanitized integration records stored on the backend."""
+    registry = get_integration_registry()
+    return IntegrationsListResponse(integrations=registry.list_integrations())
+
+
+@app.get("/integrations/{integration_id}", response_model=IntegrationSummary)
+async def get_integration(integration_id: str, _: str = Depends(verify_bearer_token)):
+    """Get a single sanitized integration record by ID."""
+    registry = get_integration_registry()
+    integration = registry.get_integration(integration_id)
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    return integration
+
+
+@app.post("/integrations", response_model=IntegrationSummary)
+async def create_integration(request: IntegrationUpsertRequest, _: str = Depends(verify_bearer_token)):
+    """Create a new backend-stored integration secret/config."""
+    registry = get_integration_registry()
+    try:
+        return registry.create_integration(request.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.patch("/integrations/{integration_id}", response_model=IntegrationSummary)
+async def update_integration(
+    integration_id: str,
+    request: IntegrationUpsertRequest,
+    _: str = Depends(verify_bearer_token)
+):
+    """Update a stored integration config without exposing the secret."""
+    registry = get_integration_registry()
+    try:
+        integration = registry.update_integration(integration_id, request.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    return integration
+
+
+@app.delete("/integrations/{integration_id}", response_model=DeleteIntegrationResponse)
+async def delete_integration(integration_id: str, _: str = Depends(verify_bearer_token)):
+    """Delete an integration record from backend storage."""
+    registry = get_integration_registry()
+    deleted = registry.delete_integration(integration_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Integration not found")
+    return DeleteIntegrationResponse(deleted=True, integration_id=integration_id)
+
+
+@app.api_route(
+    "/integrations/proxy/{integration_id}/{proxy_path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+)
+async def proxy_integration_request(
+    integration_id: str,
+    proxy_path: str,
+    request: Request,
+    _: str = Depends(verify_bearer_token)
+):
+    """Proxy an authenticated request through a backend-stored integration."""
+    registry = get_integration_registry()
+    integration = registry.get_raw_integration(integration_id)
+    if not integration:
+        raise HTTPException(status_code=404, detail="Integration not found")
+
+    try:
+        url = registry.build_proxy_url(integration, proxy_path, request.url.query)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    headers = registry.build_proxy_headers(integration)
+    for name in ("accept", "content-type", "if-none-match"):
+        value = request.headers.get(name)
+        if value:
+            headers[name] = value
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            upstream = await client.request(
+                request.method,
+                url,
+                content=await request.body() or None,
+                headers=headers,
+            )
+    except httpx.HTTPError as exc:
+        logger.error(f"Integration proxy failed: {exc}", exc_info=True)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    passthrough_headers = {
+        key: value for key, value in upstream.headers.items()
+        if key.lower() in {"content-type", "etag", "last-modified", "link", "x-ratelimit-remaining", "x-ratelimit-reset"}
+    }
+    return Response(content=upstream.content, status_code=upstream.status_code, headers=passthrough_headers)
+
+
+# ============================================================================
 # INTERACTIVE ENDPOINTS
 # ============================================================================
 
@@ -850,6 +968,9 @@ async def root():
             "calibrate_discover": "/calibrate/discover",
             "calibrate": "/calibrate",
             "calibrate_apply": "/calibrate/apply",
+            "integrations_catalog": "/integrations/catalog",
+            "integrations": "/integrations",
+            "integrations_proxy": "/integrations/proxy/{integration_id}/{path}",
             "chat": "/chat",
             "chat_history": "/chat/history",
             "chat_approve": "/chat/approve",
