@@ -18,9 +18,10 @@ logger = logging.getLogger(__name__)
 
 
 class PhaseRunner:
-    def __init__(self, model_router, repo_path: str):
+    def __init__(self, model_router, repo_path: str, model: Optional[str] = None):
         self.model_router = model_router
         self.repo_path = repo_path
+        self.model = model
         self.last_verification: Optional[VerificationReport] = None
 
     async def run_phases(
@@ -80,7 +81,8 @@ class PhaseRunner:
             }
 
             agent = AgentLoop(
-                model_router=self.model_router, repo_path=self.repo_path
+                model_router=self.model_router, repo_path=self.repo_path,
+                model=self.model,
             )
             phase_summary = f"Phase {phase.id} complete."
 
@@ -127,6 +129,7 @@ class PhaseRunner:
                     change_set=change_set,
                     context=context,
                     model_router=self.model_router,
+                    model=self.model,
                 ):
                     yield {**v_event, "phase_id": phase.id, "phase_name": phase.name}
 

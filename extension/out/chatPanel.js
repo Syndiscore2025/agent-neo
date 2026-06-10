@@ -45,7 +45,7 @@ const apiClient_1 = require("./apiClient");
 class ChatPanel {
     constructor(context) {
         this.context = context;
-        this.selectedModel = 'claude-sonnet'; // Default model
+        this.selectedModel = ''; // empty → backend DEFAULT_MODEL
         this.apiClient = new apiClient_1.ApiClient();
         vscode.window.onDidCloseTerminal(t => {
             if (t === this.terminal) {
@@ -148,7 +148,7 @@ class ChatPanel {
         console.log('Received message from webview:', message);
         switch (message.type) {
             case 'sendMessage':
-                await this.handleSendMessage(message.message, message.context, message.attachmentIds);
+                await this.handleSendMessage(message.message, message.context, message.attachmentIds, message.model);
                 break;
             case 'clearSession':
                 await this.handleClearSession();
@@ -165,6 +165,7 @@ class ChatPanel {
                     await this.loadHistory();
                 }
                 void this.initWorkspaceInfo();
+                void this.sendModelList();
                 break;
             case 'openFile':
                 await this._revealFile(message.path);
@@ -197,7 +198,7 @@ class ChatPanel {
                 await this.handleRollback();
                 break;
             case 'autoRun':
-                await this.handleAutoRun(message.task);
+                await this.handleAutoRun(message.task, message.model);
                 break;
             case 'cloneRepo':
                 await this.handleCloneRepo(message.url);
@@ -207,7 +208,7 @@ class ChatPanel {
     /**
      * Handle sending a message to the backend.
      */
-    async handleSendMessage(message, context, attachmentIds) {
+    async handleSendMessage(message, context, attachmentIds, model) {
         try {
             // Show loading state
             this.post({
@@ -218,8 +219,11 @@ class ChatPanel {
             if (!context) {
                 context = this.getCurrentContext();
             }
+            if (model) {
+                this.selectedModel = model;
+            }
             // Send to backend (with optional attachment IDs)
-            const response = await this.apiClient.sendChatMessage(message, this.sessionId, context, attachmentIds);
+            const response = await this.apiClient.sendChatMessage(message, this.sessionId, context, attachmentIds, model || this.selectedModel);
             // Update session ID
             this.sessionId = response.session_id;
             // Send response to webview
@@ -692,6 +696,23 @@ class ChatPanel {
                         cursor: not-allowed;
                     }
 
+                    /* ── Model picker ── */
+                    #modelSelect {
+                        background: var(--vscode-dropdown-background);
+                        color: var(--vscode-dropdown-foreground);
+                        border: 1px solid var(--vscode-dropdown-border, transparent);
+                        border-radius: 2px;
+                        padding: 4px 4px;
+                        font-size: 11px;
+                        max-width: 150px;
+                        cursor: pointer;
+                        align-self: center;
+                    }
+
+                    #modelSelect:focus {
+                        outline: 1px solid var(--vscode-focusBorder);
+                    }
+
                     /* ── Attach + Mic buttons ── */
                     #attachBtn, #micBtn {
                         background: var(--vscode-button-secondaryBackground, var(--vscode-input-background));
@@ -1038,6 +1059,7 @@ class ChatPanel {
                     <input type="file" id="fileInput" accept="image/*,.pdf" style="display:none">
                     <button id="micBtn" title="Speak your message (Speech-to-Text)">🎤</button>
                     <textarea id="messageInput" placeholder="Ask Agent NEO anything... (or use /commands)" rows="1"></textarea>
+                    <select id="modelSelect" title="Model for this run"></select>
                     <button id="sendBtn">Send</button>
                 </div>
 
@@ -1045,6 +1067,7 @@ class ChatPanel {
                     const vscode = acquireVsCodeApi();
                     const messagesDiv = document.getElementById('messages');
                     const messageInput = document.getElementById('messageInput');
+                    const modelSelect = document.getElementById('modelSelect');
                     const sendBtn = document.getElementById('sendBtn');
                     const clearBtn = document.getElementById('clearBtn');
                     const newThreadBtn = document.getElementById('newThreadBtn');
@@ -1069,6 +1092,7 @@ class ChatPanel {
                     let activeThreadId = persisted.activeThreadId || null;
                     let historyOpen = persisted.historyOpen || false;
                     let settingsSection = persisted.settingsSection || 'integrations';
+                    let selectedModel = persisted.selectedModel || '';  // '' → backend default
                     let lastSettingsInfo = null;   // last settingsInfo payload, for tab re-renders
                     if (persisted.lastContext) { lastContext = persisted.lastContext; }
                     // A run left 'running' by a window reload can never complete —
@@ -1092,6 +1116,7 @@ class ChatPanel {
                                 historyOpen: historyOpen,
                                 settingsOpen: settingsView.classList.contains('open'),
                                 settingsSection: settingsSection,
+                                selectedModel: selectedModel,
                                 lastContext: lastContext
                             });
                         } catch (e) { /* state save is best-effort */ }
@@ -1101,6 +1126,49 @@ class ChatPanel {
                         clearTimeout(saveTimer);
                         saveTimer = setTimeout(saveState, 400);
                     }
+
+                    // ── Model picker ──
+                    // Fill the dropdown from the backend catalog; fall back to a
+                    // small built-in list when the backend hasn't answered yet.
+                    function fmtPrice(v) {
+                        if (v == null) { return null; }
+                        return '$' + (Math.round(v * 100) / 100);
+                    }
+                    function populateModels(catalog) {
+                        let items = catalog;
+                        if (!items || !items.length) {
+                            items = [
+                                { id: 'claude-sonnet', label: 'Claude Sonnet 4', input_per_mtok: 3, output_per_mtok: 15 },
+                                { id: 'claude-opus', label: 'Claude Opus 4', input_per_mtok: 15, output_per_mtok: 75 },
+                                { id: 'gpt-4o', label: 'GPT-4o', input_per_mtok: 2.5, output_per_mtok: 10 },
+                                { id: 'o1', label: 'OpenAI o1', input_per_mtok: 15, output_per_mtok: 60 }
+                            ];
+                        }
+                        let h = '<option value="">Default</option>';
+                        items.forEach(m => {
+                            let label = m.label || m.id;
+                            let title = label;
+                            const pin = fmtPrice(m.input_per_mtok);
+                            const pout = fmtPrice(m.output_per_mtok);
+                            if (pin != null && pout != null) {
+                                label += ' · ' + pin + '/' + pout;
+                                title = label + ' per MTok (in/out)';
+                            }
+                            h += '<option value="' + escAttr(m.id) + '" title="' + escAttr(title) + '">' + escapeHtml(label) + '</option>';
+                        });
+                        modelSelect.innerHTML = h;
+                        modelSelect.value = selectedModel || '';
+                        if (modelSelect.value !== (selectedModel || '')) {
+                            // saved model no longer offered — fall back to default
+                            selectedModel = '';
+                            modelSelect.value = '';
+                        }
+                    }
+                    populateModels(null);
+                    modelSelect.addEventListener('change', () => {
+                        selectedModel = modelSelect.value;
+                        scheduleSaveState();
+                    });
 
                     // ── Polish: thread / run history strip ──
                     // Compact metadata line for a history entry (tooltip + archived card)
@@ -1469,7 +1537,7 @@ class ChatPanel {
                         if (lower.startsWith('/run ')) {
                             const task = cmd.slice(5).trim();
                             if (task) {
-                                vscode.postMessage({ type: 'autoRun', task });
+                                vscode.postMessage({ type: 'autoRun', task, model: selectedModel || undefined });
                                 return true;
                             }
                         }
@@ -1522,7 +1590,7 @@ class ChatPanel {
 
                         // Action-first: every non-slash message triggers the streaming agent loop
                         // so the agent immediately starts working with tools instead of chatting.
-                        vscode.postMessage({ type: 'autoRun', task: message });
+                        vscode.postMessage({ type: 'autoRun', task: message, model: selectedModel || undefined });
                     }
 
                     function clearSession() {
@@ -2236,6 +2304,12 @@ class ChatPanel {
                                 renderSettings(message);
                                 break;
                             }
+
+                            // ── Model picker (host pushes configured catalog) ──
+                            case 'modelList': {
+                                populateModels(message.catalog || []);
+                                break;
+                            }
                         }
                     });
 
@@ -2377,9 +2451,12 @@ class ChatPanel {
      * Each event is forwarded to the webview as it arrives so step cards
      * update in real-time instead of waiting for the full loop to finish.
      */
-    async handleAutoRun(task) {
+    async handleAutoRun(task, model) {
         if (!task) {
             return;
+        }
+        if (model !== undefined) {
+            this.selectedModel = model;
         }
         // Echo the user's task into the chat exactly as typed
         this.post({ type: 'userMessage', message: task });
@@ -2394,6 +2471,7 @@ class ChatPanel {
             task,
             session_id: this.sessionId,
             context,
+            model: this.selectedModel || undefined,
         });
         try {
             const response = await fetch(`${url}/chat/autorun/stream`, {
@@ -2593,6 +2671,24 @@ class ChatPanel {
             // git info is best-effort — workspace name still shown
         }
         this.post(info);
+    }
+    /**
+     * Fetch the configured model catalog from the backend and push it to the
+     * webview's model picker. Best-effort — the picker keeps its fallback
+     * options if the backend is unreachable.
+     */
+    async sendModelList() {
+        try {
+            const data = await this.apiClient.getModels();
+            this.post({
+                type: 'modelList',
+                models: data?.models ?? [],
+                catalog: data?.catalog ?? [],
+            });
+        }
+        catch {
+            // best-effort — webview falls back to built-in options
+        }
     }
     /**
      * Gather data for the in-webview settings surface.

@@ -2,7 +2,7 @@
   "name": "agent-neo-vscode",
   "displayName": "Agent NEO",
   "description": "Interactive coding partner powered by Agent NEO",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "publisher": "agent-neo",
   "engines": {
     "vscode": "^1.85.0"

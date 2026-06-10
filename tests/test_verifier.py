@@ -272,7 +272,7 @@ class _PassingFakeVerifier:
         self.last_report = None
 
     async def verify_and_repair(self, *, task, change_set, context=None,
-                                model_router=None):
+                                model_router=None, model=None):
         yield {"type": "verification_started"}
         yield {"type": "verification_failed", "checks_run": ["pytest"],
                "failure_summary": "1 failed", "repair_attempts": 0}
@@ -351,7 +351,7 @@ class _FailingFakeVerifier:
         self.last_report = None
 
     async def verify_and_repair(self, *, task, change_set, context=None,
-                                model_router=None):
+                                model_router=None, model=None):
         yield {"type": "verification_started"}
         yield {"type": "verification_failed", "checks_run": ["pytest"],
                "failure_summary": "1 failed", "repair_attempts": 0}

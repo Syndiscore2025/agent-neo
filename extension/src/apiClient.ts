@@ -33,14 +33,24 @@ export class ApiClient {
         message: string,
         sessionId?: string,
         context?: any,
-        attachmentIds?: string[]
+        attachmentIds?: string[],
+        model?: string
     ): Promise<any> {
         const response = await this.client.post('/chat', {
             message,
             session_id: sessionId,
             context,
-            attachment_ids: attachmentIds && attachmentIds.length > 0 ? attachmentIds : undefined
+            attachment_ids: attachmentIds && attachmentIds.length > 0 ? attachmentIds : undefined,
+            model: model || undefined
         });
+        return response.data;
+    }
+
+    /**
+     * Get available/configured LLM models ({ models: string[], catalog: {id,label,provider}[] }).
+     */
+    async getModels(): Promise<any> {
+        const response = await this.client.get('/models');
         return response.data;
     }
 
@@ -164,12 +174,13 @@ export class ApiClient {
         return { url: this.apiUrl, token: this.apiToken };
     }
 
-    async autoRun(task: string, sessionId?: string, context?: any, push: boolean = false): Promise<any> {
+    async autoRun(task: string, sessionId?: string, context?: any, push: boolean = false, model?: string): Promise<any> {
         const response = await this.client.post('/chat/autorun', {
             task,
             session_id: sessionId,
             context,
-            push
+            push,
+            model: model || undefined
         });
         return response.data;
     }

@@ -244,6 +244,7 @@ class AutoRunRequest(BaseModel):
     task: str = Field(..., min_length=1)
     context: Optional[ChatContext] = None
     push: bool = False       # If True, push to remote after applying
+    model: Optional[str] = None  # Any resolvable model id (e.g. claude-opus, gpt-4o)
 
 
 class AutoRunResponse(BaseModel):

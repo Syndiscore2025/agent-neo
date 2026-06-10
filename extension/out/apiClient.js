@@ -60,13 +60,21 @@ class ApiClient {
     /**
      * Send a chat message (with optional attachment IDs).
      */
-    async sendChatMessage(message, sessionId, context, attachmentIds) {
+    async sendChatMessage(message, sessionId, context, attachmentIds, model) {
         const response = await this.client.post('/chat', {
             message,
             session_id: sessionId,
             context,
-            attachment_ids: attachmentIds && attachmentIds.length > 0 ? attachmentIds : undefined
+            attachment_ids: attachmentIds && attachmentIds.length > 0 ? attachmentIds : undefined,
+            model: model || undefined
         });
+        return response.data;
+    }
+    /**
+     * Get available/configured LLM models ({ models: string[], catalog: {id,label,provider}[] }).
+     */
+    async getModels() {
+        const response = await this.client.get('/models');
         return response.data;
     }
     /**
@@ -169,12 +177,13 @@ class ApiClient {
     getStreamConfig() {
         return { url: this.apiUrl, token: this.apiToken };
     }
-    async autoRun(task, sessionId, context, push = false) {
+    async autoRun(task, sessionId, context, push = false, model) {
         const response = await this.client.post('/chat/autorun', {
             task,
             session_id: sessionId,
             context,
-            push
+            push,
+            model: model || undefined
         });
         return response.data;
     }

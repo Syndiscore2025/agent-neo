@@ -68,9 +68,10 @@ class AgentLoop:
       4. Repeat until the model calls `finish` or MAX_ITERATIONS reached
     """
 
-    def __init__(self, model_router, repo_path: str):
+    def __init__(self, model_router, repo_path: str, model: Optional[str] = None):
         self.model_router = model_router
         self.repo_path = repo_path
+        self.model = model
         self.last_change_set: Optional[ChangeSet] = None
 
     def _build_system(self) -> str:
@@ -108,6 +109,7 @@ class AgentLoop:
                     messages=messages,
                     tools=tools,
                     max_tokens=4096,
+                    model=self.model,
                 )
             except Exception as exc:
                 logger.error(f"LLM call failed at iteration {iteration}: {exc}")
@@ -231,6 +233,7 @@ class AgentLoop:
                 messages=messages,
                 tools=tools,
                 max_tokens=4096,
+                model=self.model,
             ):
                 ctype = chunk.get("type")
                 if ctype == "text":

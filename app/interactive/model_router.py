@@ -1,6 +1,8 @@
 """
 AGENT NEO - Model Router
-Routes requests to appropriate LLM (Claude Sonnet, Claude Opus, GPT).
+Routes requests to the appropriate LLM provider (Anthropic or OpenAI).
+Any model id is accepted: catalog aliases resolve to concrete API models,
+and unknown ids pass through by prefix (claude* → Anthropic, gpt*/o* → OpenAI).
 """
 
 import os
@@ -12,10 +14,70 @@ logger = logging.getLogger(__name__)
 
 
 class ModelType(str, Enum):
-    """Available model types."""
+    """Legacy model aliases (kept for back-compat)."""
     CLAUDE_SONNET = "claude-sonnet"
     CLAUDE_OPUS = "claude-opus"
     GPT = "gpt"
+
+
+# ── Model catalog ────────────────────────────────────────────────────────────
+# Friendly id → provider + concrete API model id. Ids NOT in the catalog still
+# work via prefix pass-through (claude* → Anthropic; gpt*/o1*/o3*/o4*/chatgpt*
+# → OpenAI), so new provider models need no code change. Extra ids can be
+# surfaced in the picker via NEO_ANTHROPIC_MODELS / NEO_OPENAI_MODELS.
+MODEL_CATALOG: dict[str, dict] = {
+    # Anthropic
+    "claude-sonnet": {"provider": "anthropic", "api_model": "claude-sonnet-4-20250514", "label": "Claude Sonnet 4"},
+    "claude-opus":   {"provider": "anthropic", "api_model": "claude-opus-4-20250514",   "label": "Claude Opus 4"},
+    # OpenAI ("gpt" alias resolves to OPENAI_MODEL env, default o1)
+    "gpt":    {"provider": "openai", "api_model": None,     "label": "GPT (OPENAI_MODEL)"},
+    "gpt-4o": {"provider": "openai", "api_model": "gpt-4o", "label": "GPT-4o"},
+    "o1":     {"provider": "openai", "api_model": "o1",     "label": "OpenAI o1"},
+    "o3":     {"provider": "openai", "api_model": "o3",     "label": "OpenAI o3"},
+}
+
+_OPENAI_PREFIXES = ("gpt", "o1", "o3", "o4", "chatgpt")
+_FALLBACK_MODEL = ("anthropic", "claude-sonnet-4-20250514")
+
+
+def _extra_env_models() -> dict[str, dict]:
+    """Extra catalog entries from NEO_ANTHROPIC_MODELS / NEO_OPENAI_MODELS (comma-separated ids)."""
+    extras: dict[str, dict] = {}
+    for env_var, provider in (("NEO_ANTHROPIC_MODELS", "anthropic"), ("NEO_OPENAI_MODELS", "openai")):
+        for mid in os.getenv(env_var, "").split(","):
+            mid = mid.strip()
+            if mid and mid not in MODEL_CATALOG:
+                extras[mid] = {"provider": provider, "api_model": mid, "label": mid}
+    return extras
+
+
+def resolve_model(model: Optional[str]) -> tuple[str, str]:
+    """
+    Resolve any model id to (provider, api_model).
+
+    Order: catalog/env-extras hit → prefix pass-through. Empty/None resolves
+    via DEFAULT_MODEL. Raises ValueError for unresolvable ids.
+    """
+    if not model:
+        default = os.getenv("DEFAULT_MODEL", "").strip() or ModelType.CLAUDE_SONNET.value
+        try:
+            return resolve_model(default)
+        except ValueError:
+            logger.warning(f"DEFAULT_MODEL '{default}' is unresolvable; falling back to claude-sonnet")
+            return _FALLBACK_MODEL
+
+    model = str(model).strip()
+    entry = MODEL_CATALOG.get(model) or _extra_env_models().get(model)
+    if entry:
+        return entry["provider"], entry["api_model"] or os.getenv("OPENAI_MODEL", "o1")
+
+    lower = model.lower()
+    if lower.startswith("claude"):
+        return "anthropic", model
+    if lower.startswith(_OPENAI_PREFIXES):
+        return "openai", model
+
+    raise ValueError(f"Cannot resolve model '{model}' to a provider")
 
 
 class ModelRouter:
@@ -86,46 +148,50 @@ class ModelRouter:
         
         return ModelType(self.default_model)
     
+    def _resolve_or_default(self, model: Optional[str]) -> tuple[str, str]:
+        """Resolve a model id, falling back to the configured default on error."""
+        try:
+            return resolve_model(model)
+        except ValueError:
+            logger.warning(f"Invalid model '{model}'; falling back to default")
+            return resolve_model(None)
+
     async def generate_response(
         self,
         prompt: str,
-        model: Optional[ModelType] = None,
+        model: Optional[str] = None,
         max_tokens: int = 4000,
         temperature: float = 0.7
     ) -> str:
         """
-        Generate response from selected model.
+        Generate response from the selected model.
 
         Args:
             prompt: Input prompt
-            model: Model to use (defaults to Sonnet)
+            model: Any resolvable model id (defaults to DEFAULT_MODEL)
             max_tokens: Maximum response tokens
             temperature: Sampling temperature
 
         Returns:
             Generated response text
         """
-        if model is None:
-            model = ModelType(self.default_model)
-
-        logger.info(f"Generating response with {model.value}")
+        provider, api_model = self._resolve_or_default(model)
+        logger.info(f"Generating response with {provider}:{api_model}")
 
         try:
-            if model in [ModelType.CLAUDE_SONNET, ModelType.CLAUDE_OPUS]:
+            if provider == "anthropic":
                 return await self._generate_anthropic_response(
                     prompt=prompt,
-                    model=model,
+                    api_model=api_model,
                     max_tokens=max_tokens,
                     temperature=temperature
                 )
-            elif model == ModelType.GPT:
-                return await self._generate_openai_response(
-                    prompt=prompt,
-                    max_tokens=max_tokens,
-                    temperature=temperature
-                )
-            else:
-                raise ValueError(f"Unknown model type: {model}")
+            return await self._generate_openai_response(
+                prompt=prompt,
+                api_model=api_model,
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
         except Exception as e:
             logger.error(f"Failed to generate response: {e}")
             raise
@@ -133,7 +199,7 @@ class ModelRouter:
     async def _generate_anthropic_response(
         self,
         prompt: str,
-        model: ModelType,
+        api_model: str,
         max_tokens: int,
         temperature: float
     ) -> str:
@@ -141,12 +207,9 @@ class ModelRouter:
         if not self._anthropic_client:
             raise ValueError("Anthropic client not initialized. Check ANTHROPIC_API_KEY.")
 
-        # Map model type to Anthropic model name
-        model_name = "claude-sonnet-4-20250514" if model == ModelType.CLAUDE_SONNET else "claude-opus-4-20250514"
-
         try:
             response = self._anthropic_client.messages.create(
-                model=model_name,
+                model=api_model,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 messages=[
@@ -159,9 +222,21 @@ class ModelRouter:
             logger.error(f"Anthropic API error: {e}")
             raise
 
+    @staticmethod
+    def _openai_token_kwargs(api_model: str, max_tokens: int, temperature: Optional[float] = None) -> dict:
+        """Token/temperature kwargs — o1/o3/o4 reasoning models use
+        max_completion_tokens and don't support temperature."""
+        if api_model.lower().startswith(("o1", "o3", "o4")):
+            return {"max_completion_tokens": max_tokens}
+        kwargs: dict = {"max_tokens": max_tokens}
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        return kwargs
+
     async def _generate_openai_response(
         self,
         prompt: str,
+        api_model: str,
         max_tokens: int,
         temperature: float
     ) -> str:
@@ -169,23 +244,11 @@ class ModelRouter:
         if not self._openai_client:
             raise ValueError("OpenAI client not initialized. Check OPENAI_API_KEY.")
 
-        # Use o1 (reasoning model) or fallback to gpt-4o
-        model_name = os.getenv("OPENAI_MODEL", "o1")
-
-        # o1/o3 reasoning models use max_completion_tokens and don't support
-        # the temperature parameter — use separate kwargs accordingly.
-        is_reasoning_model = model_name.startswith(("o1", "o3"))
-
         create_kwargs: dict = {
-            "model": model_name,
+            "model": api_model,
             "messages": [{"role": "user", "content": prompt}],
+            **self._openai_token_kwargs(api_model, max_tokens, temperature),
         }
-        if is_reasoning_model:
-            create_kwargs["max_completion_tokens"] = max_tokens
-            # temperature is not supported on reasoning models; omit it
-        else:
-            create_kwargs["max_tokens"] = max_tokens
-            create_kwargs["temperature"] = temperature
 
         try:
             response = self._openai_client.chat.completions.create(**create_kwargs)
@@ -249,15 +312,182 @@ class ModelRouter:
         logger.warning("No API keys configured for completion")
         return ""
     
+    # ── Anthropic ⇄ OpenAI conversion helpers ────────────────────────────────
+
+    @staticmethod
+    def _tools_to_openai(tools: list) -> list:
+        """Convert Anthropic tool schemas to OpenAI function-tool format."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
+                },
+            }
+            for t in tools
+        ]
+
+    @staticmethod
+    def _messages_to_openai(system: str, messages: list) -> list:
+        """Convert Anthropic-block message history to OpenAI chat format."""
+        import json as _json
+
+        oai: list = [{"role": "system", "content": system}]
+        for msg in messages:
+            role, content = msg["role"], msg["content"]
+            if isinstance(content, str):
+                oai.append({"role": role, "content": content})
+                continue
+
+            if role == "assistant":
+                text_parts: list[str] = []
+                tool_calls: list[dict] = []
+                for block in content:
+                    btype = block.get("type")
+                    if btype == "text":
+                        text_parts.append(block.get("text", ""))
+                    elif btype == "tool_use":
+                        tool_calls.append({
+                            "id": block["id"],
+                            "type": "function",
+                            "function": {
+                                "name": block["name"],
+                                "arguments": _json.dumps(block.get("input") or {}),
+                            },
+                        })
+                entry: dict = {"role": "assistant", "content": "\n".join(text_parts) or None}
+                if tool_calls:
+                    entry["tool_calls"] = tool_calls
+                oai.append(entry)
+            else:
+                # user message blocks: tool_result and/or text
+                text_parts = []
+                for block in content:
+                    btype = block.get("type")
+                    if btype == "tool_result":
+                        rc = block.get("content", "")
+                        if isinstance(rc, list):
+                            rc = "\n".join(
+                                b.get("text", "") for b in rc if isinstance(b, dict)
+                            )
+                        oai.append({
+                            "role": "tool",
+                            "tool_call_id": block.get("tool_use_id", ""),
+                            "content": str(rc),
+                        })
+                    elif btype == "text":
+                        text_parts.append(block.get("text", ""))
+                if text_parts:
+                    oai.append({"role": "user", "content": "\n".join(text_parts)})
+        return oai
+
+    async def _openai_generate_with_tools(
+        self, system: str, messages: list, tools: list, max_tokens: int, api_model: str
+    ) -> dict:
+        """OpenAI tool-use generation; returns Anthropic-shaped result dict."""
+        if not self._openai_client:
+            raise ValueError("OpenAI client not initialised. Check OPENAI_API_KEY.")
+        import json as _json
+
+        response = self._openai_client.chat.completions.create(
+            model=api_model,
+            messages=self._messages_to_openai(system, messages),
+            tools=self._tools_to_openai(tools),
+            **self._openai_token_kwargs(api_model, max_tokens),
+        )
+        choice = response.choices[0].message
+        text = choice.content or ""
+        tool_calls: list[dict] = []
+        raw_serialisable: list[dict] = []
+        if text:
+            raw_serialisable.append({"type": "text", "text": text})
+        for tc in (choice.tool_calls or []):
+            try:
+                parsed = _json.loads(tc.function.arguments or "{}")
+            except Exception:
+                parsed = {}
+            tool_calls.append({"id": tc.id, "name": tc.function.name, "input": parsed})
+            raw_serialisable.append({
+                "type": "tool_use",
+                "id": tc.id,
+                "name": tc.function.name,
+                "input": parsed,
+            })
+        return {"text": text, "tool_calls": tool_calls, "raw_content": raw_serialisable}
+
+    async def _openai_stream_with_tools(
+        self, system: str, messages: list, tools: list, max_tokens: int, api_model: str
+    ):
+        """OpenAI streaming tool-use; yields the same event vocabulary as Anthropic."""
+        if not self._openai_client:
+            yield {"type": "error", "error": "OpenAI client not initialised. Check OPENAI_API_KEY."}
+            return
+        import json as _json
+
+        try:
+            stream = self._openai_client.chat.completions.create(
+                model=api_model,
+                messages=self._messages_to_openai(system, messages),
+                tools=self._tools_to_openai(tools),
+                stream=True,
+                **self._openai_token_kwargs(api_model, max_tokens),
+            )
+            pending: dict[int, dict] = {}  # index → {"id", "name", "args"}
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                if delta is None:
+                    continue
+                if delta.content:
+                    yield {"type": "text", "content": delta.content}
+                for tc in (delta.tool_calls or []):
+                    slot = pending.setdefault(tc.index, {"id": None, "name": None, "args": ""})
+                    if tc.id:
+                        slot["id"] = tc.id
+                    if tc.function and tc.function.name and slot["name"] is None:
+                        slot["name"] = tc.function.name
+                        yield {
+                            "type": "tool_start",
+                            "tool": slot["name"],
+                            "id": slot["id"] or "",
+                            "input": {},
+                        }
+                    if tc.function and tc.function.arguments:
+                        slot["args"] += tc.function.arguments
+
+            for idx in sorted(pending):
+                slot = pending[idx]
+                if not slot["name"]:
+                    continue
+                try:
+                    parsed = _json.loads(slot["args"]) if slot["args"] else {}
+                except Exception:
+                    parsed = {}
+                yield {
+                    "type": "tool_ready",
+                    "tool": slot["name"],
+                    "id": slot["id"] or f"call_{idx}",
+                    "input": parsed,
+                }
+            yield {"type": "done"}
+
+        except Exception as exc:
+            logger.error(f"_openai_stream_with_tools error: {exc}", exc_info=True)
+            yield {"type": "error", "error": str(exc)}
+
     async def generate_with_tools(
         self,
         system: str,
         messages: list,
         tools: list,
         max_tokens: int = 4096,
+        model: Optional[str] = None,
     ) -> dict:
         """
-        Generate a response with Anthropic native tool-use.
+        Generate a response with native tool-use (Anthropic or OpenAI).
 
         Returns:
             {
@@ -268,12 +498,17 @@ class ModelRouter:
                 "raw_content": list,  # raw content blocks (for multi-turn)
             }
         """
+        provider, api_model = self._resolve_or_default(model)
+        if provider == "openai":
+            return await self._openai_generate_with_tools(
+                system, messages, tools, max_tokens, api_model
+            )
+
         if not self._anthropic_client:
             raise ValueError("Anthropic client not initialised. Check ANTHROPIC_API_KEY.")
 
-        model_name = "claude-sonnet-4-20250514"
         response = self._anthropic_client.messages.create(
-            model=model_name,
+            model=api_model,
             max_tokens=max_tokens,
             system=system,
             tools=tools,
@@ -319,25 +554,35 @@ class ModelRouter:
         messages: list,
         tools: list,
         max_tokens: int = 4096,
+        model: Optional[str] = None,
     ):
         """
-        Async generator — streams an Anthropic tool-use response event by event.
+        Async generator — streams a tool-use response event by event
+        (Anthropic or OpenAI, same event vocabulary).
 
         Yields dicts with 'type' field:
           {"type": "text",       "content": str}
           {"type": "tool_start", "tool": str, "id": str, "input": {}}
+          {"type": "tool_ready", "tool": str, "id": str, "input": dict}
           {"type": "done"}
           {"type": "error",      "error": str}
         """
+        provider, api_model = self._resolve_or_default(model)
+        if provider == "openai":
+            async for event in self._openai_stream_with_tools(
+                system, messages, tools, max_tokens, api_model
+            ):
+                yield event
+            return
+
         if not self._anthropic_client:
             yield {"type": "error", "error": "Anthropic client not initialised. Check ANTHROPIC_API_KEY."}
             return
 
-        model_name = "claude-sonnet-4-20250514"
         try:
             import anthropic as _ant
             with self._anthropic_client.messages.stream(
-                model=model_name,
+                model=api_model,
                 max_tokens=max_tokens,
                 system=system,
                 tools=tools,
@@ -392,14 +637,42 @@ class ModelRouter:
         """Check if at least one model is configured."""
         return bool(self.anthropic_api_key or self.openai_api_key)
     
+    def _configured_catalog(self) -> dict[str, dict]:
+        """Catalog (built-ins + env extras + discovered) filtered to configured providers."""
+        from app.interactive.model_pricing import get_discovered_models
+
+        catalog = {**MODEL_CATALOG, **_extra_env_models()}
+        known_api = {e["api_model"] for e in catalog.values() if e["api_model"]}
+        for provider in ("anthropic", "openai"):
+            for m in get_discovered_models(provider):
+                if m["id"] not in catalog and m["id"] not in known_api:
+                    catalog[m["id"]] = {"provider": provider, "api_model": m["id"], "label": m["label"]}
+        return {
+            mid: entry for mid, entry in catalog.items()
+            if (entry["provider"] == "anthropic" and self.anthropic_api_key)
+            or (entry["provider"] == "openai" and self.openai_api_key)
+        }
+
     def get_available_models(self) -> list[str]:
-        """Get list of available/configured models."""
-        available = []
-        if self.anthropic_api_key:
-            available.extend([ModelType.CLAUDE_SONNET.value, ModelType.CLAUDE_OPUS.value])
-        if self.openai_api_key:
-            available.append(ModelType.GPT.value)
-        return available
+        """Get list of available/configured model ids."""
+        return list(self._configured_catalog().keys())
+
+    def get_model_catalog(self) -> list[dict]:
+        """Get available models with metadata: [{id, label, provider, input/output_per_mtok}]."""
+        from app.interactive.model_pricing import get_pricing
+
+        out = []
+        for mid, entry in self._configured_catalog().items():
+            api_model = entry["api_model"] or os.getenv("OPENAI_MODEL", "o1")
+            price = get_pricing(api_model) or {}
+            out.append({
+                "id": mid,
+                "label": entry["label"],
+                "provider": entry["provider"],
+                "input_per_mtok": price.get("input_per_mtok"),
+                "output_per_mtok": price.get("output_per_mtok"),
+            })
+        return out
 
 
 # Global model router instance

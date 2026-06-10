@@ -125,9 +125,8 @@ class InteractiveOrchestrator:
         )
 
         # Generate model response — honour user's model preference if supplied
-        selected_model = None
-        if getattr(request, "model", None):
-            selected_model = self.model_router.select_model(user_preference=request.model)
+        # (generate_response resolves any model id, falling back to default)
+        selected_model = getattr(request, "model", None)
         logger.info(f"Generating response for session {session_id} (intent: {intent}, model: {selected_model})")
         model_response = await self.model_router.generate_response(
             prompt=enriched_prompt,
@@ -603,7 +602,10 @@ class InteractiveOrchestrator:
             or os.getenv("REPO_PATH", ".")
         )
 
-        agent = AgentLoop(model_router=self.model_router, repo_path=repo_path)
+        agent = AgentLoop(
+            model_router=self.model_router, repo_path=repo_path,
+            model=getattr(request, "model", None),
+        )
 
         t_start = time.monotonic()
         try:
@@ -633,6 +635,7 @@ class InteractiveOrchestrator:
                 change_set=result.change_set,
                 context=context,
                 model_router=self.model_router,
+                model=getattr(request, "model", None),
             ):
                 pass
             verify_ms = int((time.monotonic() - t_verify) * 1000)
@@ -726,7 +729,10 @@ class InteractiveOrchestrator:
             or getattr(self.engine, "repo_path", None)
             or os.getenv("REPO_PATH", ".")
         )
-        agent = AgentLoop(model_router=self.model_router, repo_path=repo_path)
+        agent = AgentLoop(
+            model_router=self.model_router, repo_path=repo_path,
+            model=getattr(request, "model", None),
+        )
 
         try:
             async for event in agent.run_stream(task=request.task, context=context):
@@ -747,6 +753,7 @@ class InteractiveOrchestrator:
                 change_set=change_set,
                 context=context,
                 model_router=self.model_router,
+                model=getattr(request, "model", None),
             ):
                 yield v_event
 
@@ -844,7 +851,10 @@ class InteractiveOrchestrator:
             return
 
         # ── 2. Execute phases ─────────────────────────────────────────────────
-        runner = PhaseRunner(model_router=self.model_router, repo_path=repo_path)
+        runner = PhaseRunner(
+            model_router=self.model_router, repo_path=repo_path,
+            model=getattr(request, "model", None),
+        )
         files_written: list[str] = []
 
         try:

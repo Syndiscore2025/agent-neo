@@ -150,6 +150,7 @@ class Verifier:
         change_set: Optional[ChangeSet],
         context: Optional[dict] = None,
         model_router=None,
+        model: Optional[str] = None,
     ) -> AsyncGenerator[dict, None]:
         """
         Run checks; on failure attempt bounded repair via the tester
@@ -205,6 +206,7 @@ class Verifier:
                     change_set=change_set,
                     context=context or {},
                     model_router=model_router,
+                    model=model,
                 )
                 if change_set is not None and repair_change_set is not None:
                     _merge_change_sets(change_set, repair_change_set)
@@ -236,6 +238,7 @@ class Verifier:
         change_set: Optional[ChangeSet],
         context: dict,
         model_router,
+        model: Optional[str] = None,
     ) -> Optional[ChangeSet]:
         """One repair attempt with the tester specialist; returns its ChangeSet."""
         from app.interactive.agent_loop import AgentLoop
@@ -253,7 +256,7 @@ class Verifier:
             "then re-run the failing check with run_command to confirm it passes."
         )
 
-        agent = AgentLoop(model_router=model_router, repo_path=self.repo_path)
+        agent = AgentLoop(model_router=model_router, repo_path=self.repo_path, model=model)
         result = await agent.run(
             task=repair_task,
             context=context,

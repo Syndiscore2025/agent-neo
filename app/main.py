@@ -3,6 +3,7 @@ AGENT NEO - FastAPI Application
 Production-ready remote execution agent.
 """
 
+import asyncio
 import os
 import logging
 import json
@@ -128,11 +129,21 @@ async def lifespan(app: FastAPI):
         if not is_cloud:
             raise
     
+    # Background model/pricing refresh (in-process scheduler)
+    refresh_task = None
+    try:
+        from app.interactive.model_pricing import refresh_loop
+        refresh_task = asyncio.create_task(refresh_loop())
+    except Exception as e:
+        logger.warning(f"Model refresh loop not started: {e}")
+
     logger.info("AGENT NEO ready")
-    
+
     yield
-    
+
     # Shutdown
+    if refresh_task:
+        refresh_task.cancel()
     logger.info("AGENT NEO shutting down...")
 
 
@@ -740,10 +751,23 @@ async def workspace_commit(request: WorkspaceCommitRequest, _: str = Depends(ver
 
 @app.get("/models")
 async def list_models(_: str = Depends(verify_bearer_token)):
-    """Return the list of available/configured LLM models."""
+    """Return available/configured LLM models (ids + catalog with metadata/pricing)."""
     from app.interactive.model_router import get_model_router
+    from app.interactive.model_pricing import last_updated
     router = get_model_router()
-    return {"models": router.get_available_models()}
+    return {
+        "models": router.get_available_models(),
+        "catalog": router.get_model_catalog(),
+        "pricing_updated_at": last_updated(),
+    }
+
+
+@app.post("/models/refresh")
+async def refresh_models(_: str = Depends(verify_bearer_token)):
+    """Force a refresh of the model/pricing cache (also runs on a schedule)."""
+    from app.interactive.model_pricing import refresh_model_data, last_updated
+    ok = await asyncio.to_thread(refresh_model_data)
+    return {"refreshed": ok, "updated_at": last_updated()}
 
 
 @app.post("/chat", response_model=ChatResponse)
