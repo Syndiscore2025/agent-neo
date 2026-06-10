@@ -59,6 +59,9 @@ from app.interactive.contracts import (
     WorkspaceStatusResponse,
     WorkspaceCommitRequest,
     WorkspaceCommitResponse,
+    RepoAttachRequest,
+    RepoCloneRequest,
+    RepoActivateRequest,
 )
 from app.interactive.orchestrator import get_orchestrator
 from app.interactive.session_manager import get_session_manager
@@ -129,6 +132,14 @@ async def lifespan(app: FastAPI):
         if not is_cloud:
             raise
     
+    # Managed repo registry: migrate existing deployments by auto-attaching
+    # the configured REPO_PATH as the initial managed repo.
+    try:
+        from app.modules.managed_repos import get_managed_repo_registry
+        get_managed_repo_registry().ensure_default(repo_path)
+    except Exception as e:
+        logger.warning(f"Managed repo registry init failed: {e}")
+
     # Background model/pricing refresh (in-process scheduler)
     refresh_task = None
     try:
@@ -770,6 +781,80 @@ async def refresh_models(_: str = Depends(verify_bearer_token)):
     return {"refreshed": ok, "updated_at": last_updated()}
 
 
+# ============================================================================
+# MANAGED REPOS — durable repo registry (attach / clone / activate)
+# ============================================================================
+
+async def _index_managed_repo(repo: dict) -> dict:
+    """Refresh the shared RepoIndex for a repo and record stats (best-effort)."""
+    from app.modules.managed_repos import get_managed_repo_registry
+    from app.modules.repo_index import get_repo_index
+    try:
+        stats = await asyncio.to_thread(get_repo_index(repo["path"]).refresh)
+        get_managed_repo_registry().mark_indexed(repo["id"], stats)
+        repo["last_index_stats"] = stats
+    except Exception as exc:
+        logger.warning(f"Initial indexing failed for {repo['path']}: {exc}")
+    return repo
+
+
+@app.get("/repos")
+async def list_managed_repos(_: str = Depends(verify_bearer_token)):
+    """List managed repos with metadata + the active repo id."""
+    from app.modules.managed_repos import get_managed_repo_registry
+    registry = get_managed_repo_registry()
+    return {
+        "repos": registry.list_repos(),
+        "active_repo_id": registry.active_repo_id,
+    }
+
+
+@app.post("/repos/attach")
+async def attach_managed_repo(request: RepoAttachRequest, _: str = Depends(verify_bearer_token)):
+    """Register an already-local git repo and trigger initial indexing."""
+    from app.modules.managed_repos import get_managed_repo_registry
+    try:
+        repo = get_managed_repo_registry().attach(request.path, request.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return await _index_managed_repo(repo)
+
+
+@app.post("/repos/clone")
+async def clone_managed_repo(request: RepoCloneRequest, _: str = Depends(verify_bearer_token)):
+    """
+    Clone a GitHub repo into the chosen path and register it. If the path
+    already holds the same repo, it is attached instead of recloned.
+    The token (if any) is used transiently — never persisted or logged.
+    """
+    from app.modules.managed_repos import get_managed_repo_registry
+    try:
+        repo = await asyncio.to_thread(
+            get_managed_repo_registry().clone,
+            request.url, request.dest_path, request.name, request.token,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return await _index_managed_repo(repo)
+
+
+@app.post("/repos/activate")
+async def activate_managed_repo(request: RepoActivateRequest, _: str = Depends(verify_bearer_token)):
+    """Mark a managed repo as the active one."""
+    from app.modules.managed_repos import get_managed_repo_registry
+    try:
+        return get_managed_repo_registry().set_active(request.repo_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.get("/runs")
+async def list_run_history(limit: int = 20, _: str = Depends(verify_bearer_token)):
+    """Durable run summaries recorded from streaming runs (newest first)."""
+    from app.modules.managed_repos import get_managed_repo_registry
+    return {"runs": get_managed_repo_registry().list_runs(limit)}
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(
     request: ChatRequest,
@@ -900,6 +985,25 @@ async def auto_run_task(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _make_run_recorder(request: AutoRunRequest, mode: str):
+    """Build a durable run recorder for a streaming run (best-effort)."""
+    try:
+        from app.modules.managed_repos import get_managed_repo_registry, RunRecorder
+        repo_path = (
+            getattr(request.context, "workspace_path", None)
+            or getattr(engine, "repo_path", None)
+            or os.getenv("REPO_PATH", ".")
+        )
+        return RunRecorder(
+            get_managed_repo_registry(), task=request.task,
+            repo_path=str(repo_path), model=getattr(request, "model", None),
+            mode=mode,
+        )
+    except Exception as exc:
+        logger.warning(f"Run recorder unavailable: {exc}")
+        return None
+
+
 @app.post("/chat/autorun/stream")
 async def auto_run_stream(
     request: AutoRunRequest,
@@ -912,16 +1016,23 @@ async def auto_run_stream(
     Event types: tool_start, tool_end, text, finish, commit, error.
     """
     orchestrator = get_orchestrator(engine)
+    recorder = _make_run_recorder(request, mode="auto")
 
     async def generate():
         try:
             async for event in orchestrator.stream_auto_run(request):
+                if recorder:
+                    recorder.observe(event)
                 payload = json.dumps(event, default=str)
                 yield f"data: {payload}\n\n"
         except Exception as exc:
             logger.error(f"SSE stream error: {exc}", exc_info=True)
+            if recorder:
+                recorder.observe({"type": "error", "error": str(exc)})
             yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
         finally:
+            if recorder:
+                recorder.finalize()
             yield "data: {\"type\": \"done\"}\n\n"
 
     return StreamingResponse(
@@ -959,16 +1070,23 @@ async def auto_run_phased(
       error             — something went wrong (non-fatal: run continues)
     """
     orchestrator = get_orchestrator(engine)
+    recorder = _make_run_recorder(request, mode="phased")
 
     async def generate():
         try:
             async for event in orchestrator.stream_phased_run(request):
+                if recorder:
+                    recorder.observe(event)
                 payload = json.dumps(event, default=str)
                 yield f"data: {payload}\n\n"
         except Exception as exc:
             logger.error(f"Phased SSE stream error: {exc}", exc_info=True)
+            if recorder:
+                recorder.observe({"type": "error", "error": str(exc)})
             yield f"data: {json.dumps({'type': 'error', 'error': str(exc)})}\n\n"
         finally:
+            if recorder:
+                recorder.finalize()
             yield "data: {\"type\": \"done\"}\n\n"
 
     return StreamingResponse(

@@ -6,6 +6,8 @@
 import * as vscode from 'vscode';
 import { ChatPanel } from './chatPanel';
 import { StatusBarManager } from './statusBar';
+import { NeoStorage } from './storage';
+import { RepoManager } from './repos';
 
 /**
  * Register all extension commands.
@@ -13,7 +15,9 @@ import { StatusBarManager } from './statusBar';
 export function registerCommands(
     context: vscode.ExtensionContext,
     chatPanel: ChatPanel,
-    statusBar: StatusBarManager
+    statusBar: StatusBarManager,
+    storage: NeoStorage,
+    repoManager: RepoManager
 ) {
     // Open Chat
     context.subscriptions.push(
@@ -121,6 +125,39 @@ export function registerCommands(
     context.subscriptions.push(
         vscode.commands.registerCommand('agent-neo.openTerminal', () => {
             chatPanel.openTerminal();
+        })
+    );
+
+    // Managed repos: list / attach local / clone GitHub / choose active
+    context.subscriptions.push(
+        vscode.commands.registerCommand('agent-neo.manageRepos', async () => {
+            await repoManager.manageRepos();
+        })
+    );
+
+    // Set/update the GitHub token (SecretStorage only — never plaintext)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('agent-neo.setGitHubToken', async () => {
+            const token = await vscode.window.showInputBox({
+                prompt: 'GitHub personal access token (stored in VS Code SecretStorage)',
+                password: true,
+                ignoreFocusOut: true
+            });
+            if (token === undefined) { return; }
+            if (!token.trim()) {
+                vscode.window.showWarningMessage('Token unchanged (empty input). Use "Clear GitHub Token" to remove it.');
+                return;
+            }
+            await storage.setGitHubToken(token.trim());
+            vscode.window.showInformationMessage('GitHub token saved to SecretStorage.');
+        })
+    );
+
+    // Clear the GitHub token
+    context.subscriptions.push(
+        vscode.commands.registerCommand('agent-neo.clearGitHubToken', async () => {
+            await storage.clearGitHubToken();
+            vscode.window.showInformationMessage('GitHub token cleared.');
         })
     );
 }

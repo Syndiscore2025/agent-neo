@@ -381,3 +381,27 @@ class WorkspaceCommitResponse(BaseModel):
     sha: Optional[str] = None
     message: str
 
+
+# ---------------------------------------------------------------------------
+# Managed repos — durable repo registry (attach / clone / activate)
+# ---------------------------------------------------------------------------
+
+class RepoAttachRequest(BaseModel):
+    """Request to register an already-local git repo."""
+    path: str = Field(..., min_length=1, description="Absolute path to a local git repository")
+    name: Optional[str] = None
+
+
+class RepoCloneRequest(BaseModel):
+    """Request to clone a GitHub repo into a user-chosen path and register it."""
+    url: str = Field(..., min_length=1, description="Repository URL (https)")
+    dest_path: str = Field(..., min_length=1, description="Absolute destination path for the clone")
+    name: Optional[str] = None
+    # Transient credential: used only for this clone, never persisted or logged
+    token: Optional[str] = None
+
+
+class RepoActivateRequest(BaseModel):
+    """Request to mark a managed repo as the active one."""
+    repo_id: str = Field(..., min_length=1)
+

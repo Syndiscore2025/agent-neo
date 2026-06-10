@@ -45,6 +45,18 @@
       {
         "command": "agent-neo.openTerminal",
         "title": "Agent NEO: Open Agent NEO Terminal"
+      },
+      {
+        "command": "agent-neo.manageRepos",
+        "title": "Agent NEO: Manage Repos"
+      },
+      {
+        "command": "agent-neo.setGitHubToken",
+        "title": "Agent NEO: Set GitHub Token"
+      },
+      {
+        "command": "agent-neo.clearGitHubToken",
+        "title": "Agent NEO: Clear GitHub Token"
       }
     ],
     "viewsContainers": {

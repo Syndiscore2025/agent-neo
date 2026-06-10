@@ -7,6 +7,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { ApiClient } from './apiClient';
+import { NeoStorage } from './storage';
 
 export class ChatPanel implements vscode.WebviewViewProvider {
     public static readonly viewId = 'agent-neo.chatView';
@@ -17,11 +18,13 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     private gitRepo: any;
     private workspaceInfoTimer: ReturnType<typeof setTimeout> | undefined;
     private apiClient: ApiClient;
+    private storage: NeoStorage;
     private sessionId: string | undefined;
     private selectedModel: string = ''; // empty → backend DEFAULT_MODEL
 
     constructor(private context: vscode.ExtensionContext) {
         this.apiClient = new ApiClient();
+        this.storage = new NeoStorage(context);
         vscode.window.onDidCloseTerminal(t => {
             if (t === this.terminal) { this.terminal = undefined; }
         }, undefined, context.subscriptions);
@@ -203,6 +206,17 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                 break;
             case 'cloneRepo':
                 await this.handleCloneRepo(message.url);
+                break;
+            case 'manageRepos':
+                void vscode.commands.executeCommand('agent-neo.manageRepos');
+                break;
+            case 'setGitHubToken':
+                await vscode.commands.executeCommand('agent-neo.setGitHubToken');
+                await this.handleGetSettingsInfo();
+                break;
+            case 'clearGitHubToken':
+                await vscode.commands.executeCommand('agent-neo.clearGitHubToken');
+                await this.handleGetSettingsInfo();
                 break;
         }
     }
@@ -1345,6 +1359,9 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                         else if (action === 'vscodeSettings') { vscode.postMessage({ type: 'openVSCodeSettings' }); }
                         else if (action === 'neoTerminal') { vscode.postMessage({ type: 'openNeoTerminal' }); }
                         else if (action === 'openFile') { vscode.postMessage({ type: 'openFile', path: el.dataset.path }); }
+                        else if (action === 'manageRepos') { vscode.postMessage({ type: 'manageRepos' }); }
+                        else if (action === 'setGitHubToken') { vscode.postMessage({ type: 'setGitHubToken' }); }
+                        else if (action === 'clearGitHubToken') { vscode.postMessage({ type: 'clearGitHubToken' }); }
                     });
 
                     // Delegated clicks: file chips open files (or diffs), ▶ buttons run commands
@@ -1376,6 +1393,33 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                         h += '<div class="settings-row"><button class="settings-btn" data-action="vscodeSettings">Open VS Code settings</button></div>';
                         h += '</div>';
                         sections.integrations = h;
+                        h = '';
+
+                        h += '<div class="settings-section"><h3>Repos</h3>';
+                        const mrepos = info.managedRepos || [];
+                        if (mrepos.length) {
+                            mrepos.forEach(r => {
+                                const isActive = r.id === info.activeRepoId;
+                                h += '<div class="settings-row"><span class="sr-key">' + (isActive ? '✓ ' : '') + escapeHtml(r.name || '') + (isActive ? ' <span class="settings-pill ok">active</span>' : '') + '</span></div>';
+                                h += '<div class="settings-row"><span class="sr-key" style="opacity:.7">' + escapeHtml(r.path || '') + '</span></div>';
+                                const meta = [];
+                                if (r.default_branch) { meta.push('branch: ' + r.default_branch); }
+                                meta.push(r.remote_url ? 'remote: ' + r.remote_url : 'no remote');
+                                meta.push(r.last_indexed_at ? 'indexed: ' + String(r.last_indexed_at).slice(0, 19).replace('T', ' ') : 'not indexed');
+                                h += '<div class="settings-row"><span class="sr-key" style="opacity:.55;font-size:11px">' + escapeHtml(meta.join('  ·  ')) + '</span></div>';
+                            });
+                        } else {
+                            h += '<div class="settings-row"><span class="sr-key">No managed repos yet — add a local repo or clone one from GitHub.</span></div>';
+                        }
+                        h += '<div class="settings-row"><button class="settings-btn" data-action="manageRepos">Manage repos…</button></div>';
+                        h += '<div class="settings-row"><span class="sr-key">GitHub token</span><span>' + (info.githubTokenSet ? '<span class="settings-pill ok">configured</span>' : 'not set') + '</span></div>';
+                        h += '<div class="settings-row">';
+                        h += '<button class="settings-btn" data-action="setGitHubToken">' + (info.githubTokenSet ? 'Update token' : 'Set token') + '</button> ';
+                        if (info.githubTokenSet) { h += '<button class="settings-btn" data-action="clearGitHubToken">Clear token</button>'; }
+                        h += '</div>';
+                        h += '<div class="settings-row"><span class="sr-key" style="opacity:.55;font-size:11px">Stored in VS Code SecretStorage. Used only when cloning private repos.</span></div>';
+                        h += '</div>';
+                        sections.repos = h;
                         h = '';
 
                         h += '<div class="settings-section"><h3>Rules &amp; Guidelines</h3>';
@@ -1423,7 +1467,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                         h += '</div>';
                         sections.account = h;
 
-                        const labels = { integrations: 'Integrations', rules: 'Rules &amp; Guidelines', context: 'Context', terminal: 'Terminal', workspace: 'Workspace', account: 'Account &amp; Preferences' };
+                        const labels = { integrations: 'Integrations', repos: 'Repos', rules: 'Rules &amp; Guidelines', context: 'Context', terminal: 'Terminal', workspace: 'Workspace', account: 'Account &amp; Preferences' };
                         if (!sections[settingsSection]) { settingsSection = 'integrations'; }
                         let tabs = '<div class="settings-tabs">';
                         Object.keys(labels).forEach(k => {
@@ -2727,6 +2771,18 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         const healthy = await this.apiClient.checkHealth();
         const repo = await this._getGitRepo();
 
+        // Managed repos + token existence (value never leaves SecretStorage)
+        let managedRepos: any[] = [];
+        let activeRepoId: string | null = null;
+        try {
+            const data = await this.apiClient.listRepos();
+            managedRepos = data?.repos ?? [];
+            activeRepoId = data?.active_repo_id ?? null;
+        } catch {
+            // backend unreachable — Repos tab shows an empty state
+        }
+        const githubTokenSet = await this.storage.hasGitHubToken();
+
         this.post({
             type: 'settingsInfo',
             apiUrl: config.get('apiUrl', 'http://127.0.0.1:8000'),
@@ -2740,6 +2796,9 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                 ? (repo.state.workingTreeChanges?.length ?? 0) +
                   (repo.state.indexChanges?.length ?? 0)
                 : null,
+            managedRepos,
+            activeRepoId,
+            githubTokenSet,
         });
     }
 

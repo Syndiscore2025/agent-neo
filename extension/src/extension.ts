@@ -8,6 +8,9 @@ import { ChatPanel } from './chatPanel';
 import { CompletionProvider } from './completionProvider';
 import { registerCommands } from './commands';
 import { StatusBarManager } from './statusBar';
+import { NeoStorage } from './storage';
+import { RepoManager } from './repos';
+import { ApiClient } from './apiClient';
 
 let chatPanel: ChatPanel | undefined;
 let completionProvider: CompletionProvider | undefined;
@@ -46,8 +49,12 @@ export function activate(context: vscode.ExtensionContext) {
         console.log('Agent NEO inline completion provider registered');
     }
 
+    // Storage split (globalState + SecretStorage) and managed repo flows
+    const storage = new NeoStorage(context);
+    const repoManager = new RepoManager(new ApiClient(), storage);
+
     // Register commands
-    registerCommands(context, chatPanel, statusBar);
+    registerCommands(context, chatPanel, statusBar, storage, repoManager);
 
     console.log('Agent NEO extension activated');
 }

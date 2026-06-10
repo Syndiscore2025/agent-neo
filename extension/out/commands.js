@@ -42,7 +42,7 @@ const vscode = __importStar(require("vscode"));
 /**
  * Register all extension commands.
  */
-function registerCommands(context, chatPanel, statusBar) {
+function registerCommands(context, chatPanel, statusBar, storage, repoManager) {
     // Open Chat
     context.subscriptions.push(vscode.commands.registerCommand('agent-neo.openChat', () => {
         chatPanel.show();
@@ -121,6 +121,32 @@ function registerCommands(context, chatPanel, statusBar) {
     // Open dedicated Agent NEO terminal
     context.subscriptions.push(vscode.commands.registerCommand('agent-neo.openTerminal', () => {
         chatPanel.openTerminal();
+    }));
+    // Managed repos: list / attach local / clone GitHub / choose active
+    context.subscriptions.push(vscode.commands.registerCommand('agent-neo.manageRepos', async () => {
+        await repoManager.manageRepos();
+    }));
+    // Set/update the GitHub token (SecretStorage only — never plaintext)
+    context.subscriptions.push(vscode.commands.registerCommand('agent-neo.setGitHubToken', async () => {
+        const token = await vscode.window.showInputBox({
+            prompt: 'GitHub personal access token (stored in VS Code SecretStorage)',
+            password: true,
+            ignoreFocusOut: true
+        });
+        if (token === undefined) {
+            return;
+        }
+        if (!token.trim()) {
+            vscode.window.showWarningMessage('Token unchanged (empty input). Use "Clear GitHub Token" to remove it.');
+            return;
+        }
+        await storage.setGitHubToken(token.trim());
+        vscode.window.showInformationMessage('GitHub token saved to SecretStorage.');
+    }));
+    // Clear the GitHub token
+    context.subscriptions.push(vscode.commands.registerCommand('agent-neo.clearGitHubToken', async () => {
+        await storage.clearGitHubToken();
+        vscode.window.showInformationMessage('GitHub token cleared.');
     }));
 }
 //# sourceMappingURL=commands.js.map

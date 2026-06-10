@@ -185,6 +185,57 @@ export class ApiClient {
         return response.data;
     }
 
+    // ── Managed repos ────────────────────────────────────────────────────
+
+    /**
+     * List managed repos ({ repos: [...], active_repo_id }).
+     */
+    async listRepos(): Promise<any> {
+        const response = await this.client.get('/repos');
+        return response.data;
+    }
+
+    /**
+     * Register an already-local git repo (idempotent; triggers indexing).
+     */
+    async attachRepo(path: string, name?: string): Promise<any> {
+        const response = await this.client.post('/repos/attach', {
+            path,
+            name: name || undefined
+        }, { timeout: 120_000 });
+        return response.data;
+    }
+
+    /**
+     * Clone a GitHub repo into destPath and register it. The token (if any)
+     * travels only in this request body and is never persisted by the backend.
+     */
+    async cloneRepo(url: string, destPath: string, name?: string, token?: string): Promise<any> {
+        const response = await this.client.post('/repos/clone', {
+            url,
+            dest_path: destPath,
+            name: name || undefined,
+            token: token || undefined
+        }, { timeout: 300_000 });
+        return response.data;
+    }
+
+    /**
+     * Mark a managed repo as the active one.
+     */
+    async activateRepo(repoId: string): Promise<any> {
+        const response = await this.client.post('/repos/activate', { repo_id: repoId });
+        return response.data;
+    }
+
+    /**
+     * Durable run summaries recorded by the backend (newest first).
+     */
+    async listRuns(limit: number = 20): Promise<any> {
+        const response = await this.client.get('/runs', { params: { limit } });
+        return response.data;
+    }
+
     /**
      * Check API health.
      */

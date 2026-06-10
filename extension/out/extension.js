@@ -44,6 +44,9 @@ const chatPanel_1 = require("./chatPanel");
 const completionProvider_1 = require("./completionProvider");
 const commands_1 = require("./commands");
 const statusBar_1 = require("./statusBar");
+const storage_1 = require("./storage");
+const repos_1 = require("./repos");
+const apiClient_1 = require("./apiClient");
 let chatPanel;
 let completionProvider;
 let statusBar;
@@ -70,8 +73,11 @@ function activate(context) {
         context.subscriptions.push(provider);
         console.log('Agent NEO inline completion provider registered');
     }
+    // Storage split (globalState + SecretStorage) and managed repo flows
+    const storage = new storage_1.NeoStorage(context);
+    const repoManager = new repos_1.RepoManager(new apiClient_1.ApiClient(), storage);
     // Register commands
-    (0, commands_1.registerCommands)(context, chatPanel, statusBar);
+    (0, commands_1.registerCommands)(context, chatPanel, statusBar, storage, repoManager);
     console.log('Agent NEO extension activated');
 }
 /**
