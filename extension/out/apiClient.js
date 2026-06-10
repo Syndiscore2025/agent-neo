@@ -78,6 +78,13 @@ class ApiClient {
         return response.data;
     }
     /**
+     * Force a refresh of the backend model/pricing cache (provider discovery).
+     */
+    async refreshModels() {
+        const response = await this.client.post('/models/refresh', {}, { timeout: 60000 });
+        return response.data;
+    }
+    /**
      * Get chat history.
      */
     async getChatHistory(sessionId) {

@@ -55,6 +55,14 @@ export class ApiClient {
     }
 
     /**
+     * Force a refresh of the backend model/pricing cache (provider discovery).
+     */
+    async refreshModels(): Promise<any> {
+        const response = await this.client.post('/models/refresh', {}, { timeout: 60_000 });
+        return response.data;
+    }
+
+    /**
      * Get chat history.
      */
     async getChatHistory(sessionId: string): Promise<any> {

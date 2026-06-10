@@ -226,6 +226,9 @@ class ChatPanel {
                 await vscode.commands.executeCommand('agent-neo.manageCliTools');
                 await this.handleGetSettingsInfo();
                 break;
+            case 'refreshModels':
+                await this.handleRefreshModels();
+                break;
         }
     }
     /**
@@ -529,12 +532,14 @@ class ChatPanel {
                     }
                     .thread-banner strong { display: block; margin-bottom: 4px; }
 
-                    /* ── Slash command hint in placeholder ── */
+                    /* ── Slash command hint — only while typing a /command ── */
                     #slashHint {
+                        display: none;
                         font-size: 10px;
                         opacity: 0.55;
                         padding: 0 16px 4px;
                     }
+                    #slashHint.visible { display: block; }
 
                     #messages {
                         flex: 1;
@@ -675,24 +680,60 @@ class ChatPanel {
                     }
 
                     #inputArea {
-                        padding: 12px 16px;
+                        padding: 0 12px 10px;
                         background-color: var(--vscode-sideBar-background);
                         border-top: 1px solid var(--vscode-panel-border);
                         display: flex;
-                        gap: 8px;
+                        flex-direction: column;
+                        gap: 6px;
                     }
 
+                    /* Drag handle above the textarea — resize the composer vertically */
+                    #composerGrip {
+                        height: 8px;
+                        margin: 0 -12px;
+                        cursor: ns-resize;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                    }
+                    #composerGrip::after {
+                        content: '';
+                        width: 36px;
+                        height: 3px;
+                        border-radius: 2px;
+                        background: var(--vscode-panel-border);
+                        opacity: 0;
+                        transition: opacity 0.15s;
+                    }
+                    #composerGrip:hover::after, #composerGrip.dragging::after { opacity: 1; }
+
                     #messageInput {
-                        flex: 1;
+                        width: 100%;
+                        box-sizing: border-box;
                         background: var(--vscode-input-background);
                         color: var(--vscode-input-foreground);
                         border: 1px solid var(--vscode-input-border);
+                        border-radius: 4px;
                         padding: 8px 12px;
                         font-family: var(--vscode-font-family);
                         font-size: var(--vscode-font-size);
                         resize: none;
                         min-height: 36px;
-                        max-height: 120px;
+                    }
+
+                    /* Toolbar row under the textarea: attach/mic left, model + send right */
+                    #composerBar {
+                        display: flex;
+                        align-items: center;
+                        justify-content: space-between;
+                        gap: 6px;
+                    }
+                    .composer-left, .composer-right {
+                        display: flex;
+                        align-items: center;
+                        gap: 6px;
+                        min-width: 0;
                     }
 
                     #messageInput:focus {
@@ -727,27 +768,27 @@ class ChatPanel {
                         border-radius: 2px;
                         padding: 4px 4px;
                         font-size: 11px;
-                        max-width: 150px;
+                        max-width: 170px;
                         cursor: pointer;
-                        align-self: center;
                     }
 
                     #modelSelect:focus {
                         outline: 1px solid var(--vscode-focusBorder);
                     }
 
-                    /* ── Attach + Mic buttons ── */
-                    #attachBtn, #micBtn {
+                    /* ── Attach + Mic + model refresh buttons ── */
+                    #attachBtn, #micBtn, #modelRefreshBtn {
                         background: var(--vscode-button-secondaryBackground, var(--vscode-input-background));
                         color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
                         border: 1px solid var(--vscode-input-border);
-                        padding: 8px 10px;
+                        padding: 6px 9px;
                         cursor: pointer;
-                        font-size: 16px;
+                        font-size: 14px;
                         border-radius: 2px;
                         line-height: 1;
                     }
-                    #attachBtn:hover, #micBtn:hover { opacity: 0.8; }
+                    #attachBtn:hover, #micBtn:hover, #modelRefreshBtn:hover { opacity: 0.8; }
+                    #modelRefreshBtn:disabled { opacity: 0.4; cursor: wait; }
 
                     /* ── AutoRun result card ── */
                     .auto-run-card {
@@ -1078,12 +1119,20 @@ class ChatPanel {
                 <div id="slashHint">💡 Slash commands: /plan &nbsp;/fix &nbsp;/verify &nbsp;/rollback &nbsp;/run &lt;task&gt; &nbsp;/clone &lt;url&gt; &nbsp;/help</div>
 
                 <div id="inputArea">
-                    <button id="attachBtn" title="Attach image or PDF">📎</button>
-                    <input type="file" id="fileInput" accept="image/*,.pdf" style="display:none">
-                    <button id="micBtn" title="Speak your message (Speech-to-Text)">🎤</button>
+                    <div id="composerGrip" title="Drag to resize — double-click to reset"></div>
                     <textarea id="messageInput" placeholder="Ask Agent NEO anything... (or use /commands)" rows="1"></textarea>
-                    <select id="modelSelect" title="Model for this run"></select>
-                    <button id="sendBtn">Send</button>
+                    <div id="composerBar">
+                        <div class="composer-left">
+                            <button id="attachBtn" title="Attach image or PDF">📎</button>
+                            <input type="file" id="fileInput" accept="image/*,.pdf" style="display:none">
+                            <button id="micBtn" title="Speak your message (Speech-to-Text)">🎤</button>
+                        </div>
+                        <div class="composer-right">
+                            <select id="modelSelect" title="Model for this run"></select>
+                            <button id="modelRefreshBtn" title="Refresh model list from providers">↻</button>
+                            <button id="sendBtn">Send</button>
+                        </div>
+                    </div>
                 </div>
 
                 <script>
@@ -1104,6 +1153,9 @@ class ChatPanel {
                     const settingsView = document.getElementById('settingsView');
                     const settingsBody = document.getElementById('settingsBody');
                     const settingsBtn = document.getElementById('settingsBtn');
+                    const slashHint = document.getElementById('slashHint');
+                    const composerGrip = document.getElementById('composerGrip');
+                    const modelRefreshBtn = document.getElementById('modelRefreshBtn');
 
                     // ── Phase D: run-state tracking + card helpers ──
                     let runState = null;      // per-run summary data, reset on streamRunStart
@@ -1116,8 +1168,10 @@ class ChatPanel {
                     let historyOpen = persisted.historyOpen || false;
                     let settingsSection = persisted.settingsSection || 'integrations';
                     let selectedModel = persisted.selectedModel || '';  // '' → backend default
+                    let composerHeight = persisted.composerHeight || null;  // null → auto-grow
                     let lastSettingsInfo = null;   // last settingsInfo payload, for tab re-renders
                     if (persisted.lastContext) { lastContext = persisted.lastContext; }
+                    if (composerHeight) { messageInput.style.height = composerHeight + 'px'; }
                     // A run left 'running' by a window reload can never complete —
                     // its stream is gone, so present it as interrupted.
                     threads.forEach(t => { if (t.status === 'running') { t.status = 'interrupted'; } });
@@ -1140,6 +1194,7 @@ class ChatPanel {
                                 settingsOpen: settingsView.classList.contains('open'),
                                 settingsSection: settingsSection,
                                 selectedModel: selectedModel,
+                                composerHeight: composerHeight,
                                 lastContext: lastContext
                             });
                         } catch (e) { /* state save is best-effort */ }
@@ -1188,6 +1243,10 @@ class ChatPanel {
                         }
                     }
                     populateModels(null);
+                    modelRefreshBtn.addEventListener('click', () => {
+                        modelRefreshBtn.disabled = true;
+                        vscode.postMessage({ type: 'refreshModels' });
+                    });
                     modelSelect.addEventListener('change', () => {
                         selectedModel = modelSelect.value;
                         scheduleSaveState();
@@ -1508,10 +1567,45 @@ class ChatPanel {
                     const NEW_THREAD_THRESHOLD = 20; // suggest new thread after N messages
                     // SLICE 6 — pending attachments accumulate until message is sent
                     let pendingAttachmentIds = [];
-                    // ── Auto-resize textarea ──
-                    messageInput.addEventListener('input', () => {
+                    // ── Auto-grow textarea (manual drag height wins) ──
+                    function autoGrow() {
+                        if (composerHeight != null) { return; }
                         messageInput.style.height = 'auto';
-                        messageInput.style.height = messageInput.scrollHeight + 'px';
+                        const cap = Math.max(120, Math.floor(window.innerHeight * 0.4));
+                        messageInput.style.height = Math.min(messageInput.scrollHeight, cap) + 'px';
+                    }
+                    messageInput.addEventListener('input', () => {
+                        autoGrow();
+                        slashHint.classList.toggle('visible', messageInput.value.charAt(0) === '/');
+                    });
+
+                    // ── Composer grip: drag up/down to resize, double-click resets ──
+                    let gripStartY = 0, gripStartH = 0, gripDragging = false;
+                    composerGrip.addEventListener('mousedown', (e) => {
+                        gripDragging = true;
+                        gripStartY = e.clientY;
+                        gripStartH = messageInput.offsetHeight;
+                        composerGrip.classList.add('dragging');
+                        e.preventDefault();
+                    });
+                    window.addEventListener('mousemove', (e) => {
+                        if (!gripDragging) { return; }
+                        const max = Math.floor(window.innerHeight * 0.7);
+                        const h = Math.max(36, Math.min(max, gripStartH + (gripStartY - e.clientY)));
+                        composerHeight = h;
+                        messageInput.style.height = h + 'px';
+                    });
+                    window.addEventListener('mouseup', () => {
+                        if (gripDragging) {
+                            gripDragging = false;
+                            composerGrip.classList.remove('dragging');
+                            scheduleSaveState();
+                        }
+                    });
+                    composerGrip.addEventListener('dblclick', () => {
+                        composerHeight = null;
+                        autoGrow();
+                        scheduleSaveState();
                     });
 
                     // Send message on Enter (Shift+Enter for new line)
@@ -1575,8 +1669,7 @@ class ChatPanel {
                                 transcript += event.results[i][0].transcript;
                             }
                             messageInput.value = transcript;
-                            messageInput.style.height = 'auto';
-                            messageInput.style.height = messageInput.scrollHeight + 'px';
+                            autoGrow();
                         };
                         sttRecognition.onend = () => {
                             sttActive = false;
@@ -1653,9 +1746,10 @@ class ChatPanel {
                         const message = messageInput.value.trim();
                         if (!message || isLoading) return;
 
-                        // Clear input
+                        // Clear input (manual drag height is preserved)
                         messageInput.value = '';
-                        messageInput.style.height = 'auto';
+                        if (composerHeight == null) { autoGrow(); }
+                        slashHint.classList.remove('visible');
                         clearSuggestions();
 
                         // Intercept slash commands before sending to backend
@@ -2400,7 +2494,11 @@ class ChatPanel {
 
                             // ── Model picker (host pushes configured catalog) ──
                             case 'modelList': {
-                                populateModels(message.catalog || []);
+                                // keep the current list if a refresh came back empty
+                                if (message.catalog && message.catalog.length) {
+                                    populateModels(message.catalog);
+                                }
+                                modelRefreshBtn.disabled = false;
                                 break;
                             }
                         }
@@ -2781,7 +2879,20 @@ class ChatPanel {
         }
         catch {
             // best-effort — webview falls back to built-in options
+            this.post({ type: 'modelList', models: [], catalog: [] });
         }
+    }
+    /**
+     * Force a backend model/pricing refresh, then re-push the catalog.
+     */
+    async handleRefreshModels() {
+        try {
+            await this.apiClient.refreshModels();
+        }
+        catch {
+            // backend unreachable — still re-send so the button re-enables
+        }
+        await this.sendModelList();
     }
     /**
      * Gather data for the in-webview settings surface.
