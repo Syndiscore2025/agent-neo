@@ -248,9 +248,12 @@ class AgentLoop:
                     # Emit a richer tool_start now that we have the full input
                     rich_start: dict = {"type": "tool_start", "tool": chunk["tool"]}
                     inp = chunk["input"]
-                    if chunk["tool"] in ("read_file", "write_file", "list_dir"):
+                    if chunk["tool"] in ("read_file", "write_file", "list_dir", "delete_file"):
                         if inp.get("path"):
                             rich_start["path"] = inp["path"].lstrip("/\\")
+                    elif chunk["tool"] == "rename_file":
+                        if inp.get("old_path"):
+                            rich_start["path"] = inp["old_path"].lstrip("/\\")
                     elif chunk["tool"] == "run_command":
                         if inp.get("command"):
                             rich_start["command"] = inp["command"]
@@ -344,6 +347,15 @@ class AgentLoop:
                     event["command"] = inp["command"]
                 elif tc["name"] == "list_dir":
                     event["path"] = inp.get("path", ".").lstrip("/\\") or "."
+                elif tc["name"] == "delete_file" and inp.get("path"):
+                    event["path"] = inp["path"].lstrip("/\\")
+                    event["operation"] = "delete"
+                elif tc["name"] == "rename_file":
+                    if inp.get("new_path"):
+                        event["path"] = inp["new_path"].lstrip("/\\")
+                    if inp.get("old_path"):
+                        event["renamed_from"] = inp["old_path"].lstrip("/\\")
+                    event["operation"] = "rename"
                 elif tc["name"] in ("search_code", "semantic_search"):
                     event["query"] = inp.get("pattern") or inp.get("query", "")
                 yield event

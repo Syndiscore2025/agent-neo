@@ -25,6 +25,12 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         vscode.window.onDidCloseTerminal(t => {
             if (t === this.terminal) { this.terminal = undefined; }
         }, undefined, context.subscriptions);
+        // Read-only scheme serving pre-run file content for diff previews
+        context.subscriptions.push(
+            vscode.workspace.registerTextDocumentContentProvider('agent-neo-prerun', {
+                provideTextDocumentContent: uri => this.providePreRunContent(uri)
+            })
+        );
     }
 
     /**
@@ -175,6 +181,9 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                 break;
             case 'openVSCodeSettings':
                 void vscode.commands.executeCommand('workbench.action.openSettings', 'agentNeo');
+                break;
+            case 'openDiff':
+                await this._openDiff(message.path, message.ref, message.old);
                 break;
             case 'uploadAttachment':
                 await this.handleUploadAttachment(message.fileName, message.fileType, message.contentBase64);
@@ -969,6 +978,56 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                     .settings-btn:hover { opacity: 0.85; }
                     .settings-file { cursor: pointer; color: var(--vscode-textLink-foreground); }
                     .settings-file:hover { text-decoration: underline; }
+                    /* ── Polish: per-file stats + run history ── */
+                    .chip-stat { margin-left: 5px; font-size: 10px; }
+                    .chip-stat .ca { color: var(--vscode-gitDecoration-addedResourceForeground, #2ea043); }
+                    .chip-stat .cr { color: var(--vscode-gitDecoration-deletedResourceForeground, #f85149); }
+                    #runHistory {
+                        display: none;
+                        padding: 2px 10px 4px;
+                        border-bottom: 1px solid var(--vscode-panel-border, #333);
+                        font-size: 12px;
+                        flex-shrink: 0;
+                    }
+                    .run-head { cursor: pointer; opacity: 0.8; padding: 3px 0; user-select: none; }
+                    .run-head:hover { opacity: 1; }
+                    .run-row {
+                        cursor: pointer;
+                        padding: 2px 6px;
+                        border-radius: 3px;
+                        white-space: nowrap;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                    }
+                    .run-row:hover { background: var(--vscode-list-hoverBackground, #2a2d2e); }
+                    .run-row.active {
+                        background: var(--vscode-list-activeSelectionBackground, #094771);
+                        color: var(--vscode-list-activeSelectionForeground, #fff);
+                    }
+                    .run-flash { outline: 2px solid var(--vscode-focusBorder, #007fd4); }
+                    .chip-badge {
+                        margin-left: 5px;
+                        font-size: 9px;
+                        padding: 0 4px;
+                        border-radius: 6px;
+                        text-transform: uppercase;
+                        background: var(--vscode-badge-background, #4d4d4d);
+                        color: var(--vscode-badge-foreground, #fff);
+                    }
+                    .chip-badge.del { background: var(--vscode-editorError-foreground, #f85149); color: #fff; }
+                    .settings-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
+                    .settings-tab {
+                        cursor: pointer;
+                        padding: 2px 8px;
+                        border-radius: 8px;
+                        font-size: 11px;
+                        background: var(--vscode-button-secondaryBackground, #3a3d41);
+                        color: var(--vscode-button-secondaryForeground, #fff);
+                    }
+                    .settings-tab.active {
+                        background: var(--vscode-button-background, #0e639c);
+                        color: var(--vscode-button-foreground, #fff);
+                    }
                 </style>
             </head>
             <body>
@@ -981,6 +1040,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                     </div>
                 </div>
                 <div id="wsStrip"></div>
+                <div id="runHistory"></div>
 
                 <div id="settingsView">
                     <div class="settings-head">
@@ -1017,6 +1077,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                     const suggestionsContainer = document.getElementById('suggestionsContainer');
                     const attachmentPreview = document.getElementById('attachmentPreview');
                     const wsStrip = document.getElementById('wsStrip');
+                    const runHistory = document.getElementById('runHistory');
                     const settingsView = document.getElementById('settingsView');
                     const settingsBody = document.getElementById('settingsBody');
                     const settingsBtn = document.getElementById('settingsBtn');
@@ -1025,19 +1086,149 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                     let runState = null;      // per-run summary data, reset on streamRunStart
                     let lastContext = null;   // last context_ready payload (shown in settings)
 
+                    // ── Polish: persisted webview state (survives reload/hide) ──
+                    const persisted = vscode.getState() || {};
+                    let threads = persisted.threads || [];           // recent runs, newest first
+                    let activeThreadId = persisted.activeThreadId || null;
+                    let historyOpen = persisted.historyOpen || false;
+                    let settingsSection = persisted.settingsSection || 'integrations';
+                    let lastSettingsInfo = null;   // last settingsInfo payload, for tab re-renders
+                    if (persisted.lastContext) { lastContext = persisted.lastContext; }
+                    // A run left 'running' by a window reload can never complete —
+                    // its stream is gone, so present it as interrupted.
+                    threads.forEach(t => { if (t.status === 'running') { t.status = 'interrupted'; } });
+
+                    function saveState() {
+                        try {
+                            let kids = Array.prototype.slice.call(messagesDiv.children, -60);
+                            let html = kids.map(k => k.outerHTML).join('');
+                            // cap size by dropping whole oldest cards (never slice mid-tag)
+                            while (html.length > 200000 && kids.length > 1) {
+                                kids = kids.slice(1);
+                                html = kids.map(k => k.outerHTML).join('');
+                            }
+                            vscode.setState({
+                                html: html,
+                                ws: wsStrip.innerHTML,
+                                threads: threads,
+                                activeThreadId: activeThreadId,
+                                historyOpen: historyOpen,
+                                settingsOpen: settingsView.classList.contains('open'),
+                                settingsSection: settingsSection,
+                                lastContext: lastContext
+                            });
+                        } catch (e) { /* state save is best-effort */ }
+                    }
+                    let saveTimer = null;
+                    function scheduleSaveState() {
+                        clearTimeout(saveTimer);
+                        saveTimer = setTimeout(saveState, 400);
+                    }
+
+                    // ── Polish: thread / run history strip ──
+                    // Compact metadata line for a history entry (tooltip + archived card)
+                    function threadMetaStr(t) {
+                        const meta = [];
+                        if (t.ts) { meta.push('Started ' + new Date(t.ts).toLocaleString()); }
+                        if (t.files != null) { meta.push(t.files + ' file(s)'); }
+                        if (t.added || t.removed) { meta.push('+' + (t.added || 0) + ' −' + (t.removed || 0)); }
+                        if (t.sha) { meta.push('commit ' + t.sha); }
+                        return meta.join(' · ');
+                    }
+
+                    function threadIcon(t) {
+                        if (t.status === 'running') { return '⏳'; }
+                        if (t.status === 'committed') { return '✅'; }
+                        if (t.status === 'blocked') { return '⛔'; }
+                        if (t.status === 'halted') { return '🛑'; }
+                        if (t.status === 'interrupted') { return '⚠️'; }
+                        if (t.status === 'error') { return '❌'; }
+                        return '☑️';
+                    }
+
+                    function renderThreads() {
+                        if (!threads.length) { runHistory.innerHTML = ''; runHistory.style.display = 'none'; return; }
+                        runHistory.style.display = 'block';
+                        let h = '<div class="run-head">' + (historyOpen ? '▾' : '▸') + ' 🕘 Recent runs (' + threads.length + ')</div>';
+                        if (historyOpen) {
+                            threads.forEach(t => {
+                                h += '<div class="run-row' + (t.id === activeThreadId ? ' active' : '') +
+                                    '" data-run="' + escAttr(t.id) + '" title="' + escAttr(threadMetaStr(t)) + '">' +
+                                    threadIcon(t) + ' ' + escapeHtml(t.task || '(task)') + '</div>';
+                            });
+                        }
+                        runHistory.innerHTML = h;
+                    }
+
+                    runHistory.addEventListener('click', (e) => {
+                        if (e.target.closest('.run-head')) {
+                            historyOpen = !historyOpen;
+                            renderThreads();
+                            scheduleSaveState();
+                            return;
+                        }
+                        const row = e.target.closest('.run-row');
+                        if (!row) return;
+                        activeThreadId = row.dataset.run;
+                        renderThreads();
+                        const card = messagesDiv.querySelector('[data-run-id="' + activeThreadId + '"]');
+                        if (card) {
+                            card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                            card.classList.add('run-flash');
+                            setTimeout(() => card.classList.remove('run-flash'), 1600);
+                        } else {
+                            // Detailed cards were trimmed — show high-level metadata instead
+                            const t = threads.find(x => x.id === activeThreadId);
+                            if (t) {
+                                const meta = threadMetaStr(t);
+                                const wrapper = document.createElement('div');
+                                wrapper.className = 'message assistant';
+                                wrapper.innerHTML = '<div class="neo-card">' +
+                                    '<div class="neo-card-title">🗃️ Archived run — ' + escapeHtml(t.task || '') + '</div>' +
+                                    '<div class="neo-card-body">Status: ' + escapeHtml(t.status || 'unknown') +
+                                    (meta ? '<br>' + escapeHtml(meta) : '') +
+                                    '<br><span style="opacity:.7">Detailed cards for this run were trimmed from the view.</span></div></div>';
+                                messagesDiv.appendChild(wrapper);
+                                scrollToBottom();
+                            }
+                        }
+                        scheduleSaveState();
+                    });
+
                     function escAttr(s) {
                         return String(s == null ? '' : s)
                             .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
                             .replace(/</g, '&lt;').replace(/>/g, '&gt;');
                     }
 
-                    // files: array of strings or {path, reason} objects → clickable chips
-                    function fileChipsHtml(files) {
+                    // files: array of strings or {path, reason} objects → clickable chips.
+                    // stats: optional {path: {added, removed, op?, renamedFrom?}} map →
+                    //   compact +/- suffix plus deleted/renamed badges.
+                    // ref: optional pre-run git ref → chips open a diff instead of the file.
+                    function fileChipsHtml(files, stats, ref) {
                         return (files || []).map(f => {
                             const p = typeof f === 'string' ? f : (f.path || '');
                             const reason = (f && typeof f === 'object' && f.reason) ? f.reason : '';
-                            return '<span class="file-chip" data-path="' + escAttr(p) +
-                                '" title="' + escAttr(reason) + '">' + escapeHtml(p) + '</span>';
+                            const st = stats ? stats[p] : null;
+                            const statHtml = (st && (st.added || st.removed))
+                                ? ' <span class="chip-stat"><span class="ca">+' + (st.added || 0) + '</span> <span class="cr">−' + (st.removed || 0) + '</span></span>'
+                                : '';
+                            let badge = '';
+                            let oldAttr = '';
+                            let title = reason;
+                            if (st && st.op === 'deleted') {
+                                badge = ' <span class="chip-badge del">deleted</span>';
+                                title = title || 'deleted in this run — click to view the pre-run version';
+                            } else if (st && st.op === 'renamed') {
+                                badge = ' <span class="chip-badge">renamed</span>';
+                                if (st.renamedFrom) {
+                                    title = title || ('renamed from ' + st.renamedFrom);
+                                    oldAttr = '" data-old="' + escAttr(st.renamedFrom);
+                                }
+                            }
+                            const refAttr = ref ? '" data-ref="' + escAttr(ref) : '';
+                            return '<span class="file-chip" data-path="' + escAttr(p) + refAttr + oldAttr +
+                                '" title="' + escAttr(title) + '">' + escapeHtml(p) + statHtml + badge + '</span>';
                         }).join('');
                     }
 
@@ -1056,16 +1247,24 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                         if (!runState || !files) return;
                         files.forEach(f => {
                             const p = typeof f === 'string' ? f : (f.path || '');
-                            if (p) { runState.files[p] = true; }
+                            if (p && !runState.files[p]) { runState.files[p] = { added: 0, removed: 0 }; }
                         });
                     }
 
                     settingsBtn.addEventListener('click', () => {
                         settingsView.classList.add('open');
                         vscode.postMessage({ type: 'getSettingsInfo' });
+                        scheduleSaveState();
                     });
 
                     settingsView.addEventListener('click', (e) => {
+                        const tab = e.target.closest('.settings-tab');
+                        if (tab && tab.dataset.section) {
+                            settingsSection = tab.dataset.section;
+                            if (lastSettingsInfo) { renderSettings(lastSettingsInfo); }
+                            scheduleSaveState();
+                            return;
+                        }
                         const chip = e.target.closest('.file-chip');
                         if (chip && chip.dataset.path) {
                             vscode.postMessage({ type: 'openFile', path: chip.dataset.path });
@@ -1074,17 +1273,21 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                         const el = e.target.closest('[data-action]');
                         if (!el) return;
                         const action = el.dataset.action;
-                        if (action === 'close') { settingsView.classList.remove('open'); }
+                        if (action === 'close') { settingsView.classList.remove('open'); scheduleSaveState(); }
                         else if (action === 'vscodeSettings') { vscode.postMessage({ type: 'openVSCodeSettings' }); }
                         else if (action === 'neoTerminal') { vscode.postMessage({ type: 'openNeoTerminal' }); }
                         else if (action === 'openFile') { vscode.postMessage({ type: 'openFile', path: el.dataset.path }); }
                     });
 
-                    // Delegated clicks: file chips open files, ▶ buttons run commands
+                    // Delegated clicks: file chips open files (or diffs), ▶ buttons run commands
                     messagesDiv.addEventListener('click', (e) => {
                         const chip = e.target.closest('.file-chip');
                         if (chip && chip.dataset.path) {
-                            vscode.postMessage({ type: 'openFile', path: chip.dataset.path });
+                            if (chip.dataset.ref) {
+                                vscode.postMessage({ type: 'openDiff', path: chip.dataset.path, ref: chip.dataset.ref, old: chip.dataset.old });
+                            } else {
+                                vscode.postMessage({ type: 'openFile', path: chip.dataset.path });
+                            }
                             return;
                         }
                         const runBtn = e.target.closest('.term-run-btn');
@@ -1094,6 +1297,8 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                     });
 
                     function renderSettings(info) {
+                        lastSettingsInfo = info;
+                        const sections = {};
                         let h = '';
                         h += '<div class="settings-section"><h3>Integrations</h3>';
                         h += '<div class="settings-row"><span class="sr-key">Backend API</span><span>' + escapeHtml(info.apiUrl || '') + '</span></div>';
@@ -1102,6 +1307,8 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                         h += '<div class="settings-row"><span class="sr-key">API token</span><span>' + (info.tokenSet ? 'configured' : 'not set') + '</span></div>';
                         h += '<div class="settings-row"><button class="settings-btn" data-action="vscodeSettings">Open VS Code settings</button></div>';
                         h += '</div>';
+                        sections.integrations = h;
+                        h = '';
 
                         h += '<div class="settings-section"><h3>Rules &amp; Guidelines</h3>';
                         if ((info.guidelineFiles || []).length) {
@@ -1112,6 +1319,8 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                             h += '<div class="settings-row"><span class="sr-key">No guideline files (.neo, .neo.md, AGENT.md) found in the workspace root.</span></div>';
                         }
                         h += '</div>';
+                        sections.rules = h;
+                        h = '';
 
                         h += '<div class="settings-section"><h3>Context</h3>';
                         if (lastContext) {
@@ -1121,11 +1330,15 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                             h += '<div class="settings-row"><span class="sr-key">Context packs appear here after an AutoRun starts.</span></div>';
                         }
                         h += '</div>';
+                        sections.context = h;
+                        h = '';
 
                         h += '<div class="settings-section"><h3>Terminal</h3>';
                         h += '<div class="settings-row"><span class="sr-key">Commands suggested by the agent run in a dedicated "Agent NEO" terminal.</span></div>';
                         h += '<div class="settings-row"><button class="settings-btn" data-action="neoTerminal">Open Agent NEO terminal</button></div>';
                         h += '</div>';
+                        sections.terminal = h;
+                        h = '';
 
                         h += '<div class="settings-section"><h3>Workspace</h3>';
                         h += '<div class="settings-row"><span class="sr-key">Folder</span><span>' + escapeHtml(info.workspace || '—') + '</span></div>';
@@ -1133,13 +1346,23 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                         h += '<div class="settings-row"><span class="sr-key">Branch</span><span>' + escapeHtml(info.branch || '—') + '</span></div>';
                         h += '<div class="settings-row"><span class="sr-key">Pending changes</span><span>' + (info.dirty == null ? '—' : info.dirty) + '</span></div>';
                         h += '</div>';
+                        sections.workspace = h;
+                        h = '';
 
                         h += '<div class="settings-section"><h3>Account &amp; Preferences</h3>';
                         h += '<div class="settings-row"><span class="sr-key">All Agent NEO preferences (API URL, token, model) live under the agentNeo.* settings namespace.</span></div>';
                         h += '<div class="settings-row"><button class="settings-btn" data-action="vscodeSettings">Manage preferences</button></div>';
                         h += '</div>';
+                        sections.account = h;
 
-                        settingsBody.innerHTML = h;
+                        const labels = { integrations: 'Integrations', rules: 'Rules &amp; Guidelines', context: 'Context', terminal: 'Terminal', workspace: 'Workspace', account: 'Account &amp; Preferences' };
+                        if (!sections[settingsSection]) { settingsSection = 'integrations'; }
+                        let tabs = '<div class="settings-tabs">';
+                        Object.keys(labels).forEach(k => {
+                            tabs += '<span class="settings-tab' + (k === settingsSection ? ' active' : '') + '" data-section="' + k + '">' + labels[k] + '</span>';
+                        });
+                        tabs += '</div>';
+                        settingsBody.innerHTML = tabs + sections[settingsSection];
                     }
 
                     let isLoading = false;
@@ -1584,6 +1807,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
 
                     function scrollToBottom() {
                         messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                        scheduleSaveState();
                     }
 
                     function escapeHtml(str) {
@@ -1662,11 +1886,18 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                             case 'sessionCleared':
                                 messagesDiv.innerHTML = '';
                                 messageCount = 0;
+                                threads = [];
+                                activeThreadId = null;
+                                renderThreads();
+                                scheduleSaveState();
                                 break;
 
                             case 'loadHistory':
                                 messagesDiv.innerHTML = '';
                                 messageCount = 0;
+                                threads = [];
+                                activeThreadId = null;
+                                renderThreads();
                                 message.messages.forEach(msg => {
                                     addMessage(msg.role, msg.content);
                                     messageCount++;
@@ -1717,15 +1948,24 @@ export class ChatPanel implements vscode.WebviewViewProvider {
 
                             // ── Live streaming run card ──────────────────────────
                             case 'streamRunStart': {
+                                // Any thread still 'running' here lost its stream — mark interrupted
+                                threads.forEach(t => { if (t.status === 'running') { t.status = 'interrupted'; } });
+                                const runId = 'run_' + Date.now();
+                                threads.unshift({ id: runId, task: (message.task || '').slice(0, 80), ts: Date.now(), status: 'running' });
+                                threads = threads.slice(0, 10);
+                                activeThreadId = runId;
+                                renderThreads();
                                 runState = {
+                                    runId: runId, preRunRef: message.preRunRef || null,
                                     files: {}, commits: [], repairAttempts: 0,
                                     blocked: false, reverted: false, halted: false,
-                                    haltReason: '', verification: null
+                                    haltReason: '', verification: null, error: false
                                 };
                                 // Create a live card element we'll update in-place
                                 const card = document.createElement('div');
                                 card.className = 'message assistant';
                                 card.id = 'streamRunCard';
+                                card.dataset.runId = runId;
                                 card.innerHTML =
                                     '<div class="auto-run-card">' +
                                     '<div class="auto-run-header" id="srHeader">⚙️ <strong>Running:</strong> ' + escapeHtml(message.task) + '</div>' +
@@ -1791,7 +2031,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                                     trackFiles(ev.files);
                                     if (runState && ev.commit_sha) { runState.commits.push(ev.commit_sha); }
                                     appendRunCard('<div class="neo-card-title">🔖 Phase checkpoint — ' + escapeHtml((ev.commit_sha || '').slice(0, 8)) + '</div>' +
-                                        '<div>' + fileChipsHtml(ev.files) + '</div>', 'ok');
+                                        '<div>' + fileChipsHtml(ev.files, runState && runState.files) + '</div>', 'ok');
 
                                 // ── Tool activity ──
                                 } else if (ev.type === 'tool_start' && stepsEl) {
@@ -1823,7 +2063,23 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                                             (snippet ? '<br><span class="step-msg">' + escapeHtml(snippet) + '</span>' : '');
                                     }
                                     if (!existing) { stepsEl.appendChild(row); }
-                                    if (ev.tool === 'write_file' && ev.path) { trackFiles([ev.path]); }
+                                    if (ev.tool === 'write_file' && ev.path) {
+                                        trackFiles([ev.path]);
+                                        const st = runState && runState.files[ev.path];
+                                        if (st) {
+                                            st.added += (ev.lines_added || 0);
+                                            st.removed += (ev.lines_removed || 0);
+                                        }
+                                    } else if ((ev.tool === 'delete_file' || ev.tool === 'rename_file') && ev.path &&
+                                               (ev.result || '').indexOf('[error]') !== 0) {
+                                        trackFiles([ev.path]);
+                                        const st = runState && runState.files[ev.path];
+                                        if (st && ev.tool === 'delete_file') { st.op = 'deleted'; }
+                                        if (st && ev.tool === 'rename_file') {
+                                            st.op = 'renamed';
+                                            st.renamedFrom = ev.renamed_from || '';
+                                        }
+                                    }
                                     scrollToBottom();
 
                                 // ── Verification + repair (Phase C) ──
@@ -1896,6 +2152,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                                     }
                                     scrollToBottom();
                                 } else if (ev.type === 'error') {
+                                    if (runState) { runState.error = true; }
                                     if (headerEl) {
                                         headerEl.innerHTML = '❌ <strong>Error:</strong> ' + escapeHtml(ev.error || 'Unknown error');
                                     }
@@ -1910,12 +2167,34 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                                 // Final run summary card
                                 if (runState) {
                                     const files = Object.keys(runState.files);
+                                    let totAdded = 0, totRemoved = 0;
+                                    files.forEach(p => {
+                                        totAdded += (runState.files[p].added || 0);
+                                        totRemoved += (runState.files[p].removed || 0);
+                                    });
+                                    // Update this run's entry in the history strip
+                                    const t = threads.find(x => x.id === runState.runId);
+                                    if (t) {
+                                        if (runState.blocked) { t.status = 'blocked'; }
+                                        else if (runState.halted) { t.status = 'halted'; }
+                                        else if (runState.error) { t.status = 'error'; }
+                                        else if (runState.commits.length) { t.status = 'committed'; }
+                                        else { t.status = 'done'; }
+                                        // Durable metadata — survives even after cards are trimmed
+                                        t.files = files.length;
+                                        t.added = totAdded;
+                                        t.removed = totRemoved;
+                                        t.sha = (runState.commits[0] || '').slice(0, 8);
+                                        renderThreads();
+                                    }
                                     const v = runState.verification;
                                     let status;
                                     if (runState.blocked) {
                                         status = '⛔ Blocked by governance' + (runState.reverted ? ' — changes reverted' : '');
                                     } else if (runState.halted) {
                                         status = '🛑 Halted — ' + (runState.haltReason || 'see details above') + (runState.reverted ? ' (changes reverted)' : '');
+                                    } else if (runState.error) {
+                                        status = '❌ Error — see details above';
                                     } else if (runState.commits.length) {
                                         status = '✅ Committed (' + runState.commits.map(s => (s || '').slice(0, 8)).join(', ') + ')';
                                     } else if (files.length) {
@@ -1925,9 +2204,21 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                                     }
                                     let h = '<div class="neo-card-title">📋 Run summary</div>';
                                     h += '<div class="neo-card-body">' + escapeHtml(status) + '</div>';
+                                    // One-line plain-language recap from tracked run data
+                                    const parts = [];
+                                    if (files.length) { parts.push('edited ' + files.length + ' file(s) (+' + totAdded + ' −' + totRemoved + ')'); }
+                                    if (v && v.final_status) {
+                                        parts.push('verification ' + v.final_status +
+                                            ((v.repair_attempts || 0) > 0 ? ' after ' + v.repair_attempts + ' repair attempt(s)' : ''));
+                                    }
+                                    if (runState.commits.length) { parts.push('committed as ' + runState.commits.map(s => (s || '').slice(0, 8)).join(', ')); }
+                                    if (runState.reverted) { parts.push('all staged edits were reverted'); }
+                                    if (parts.length) {
+                                        h += '<div class="neo-card-body" style="opacity:.85">' + escapeHtml('This run ' + parts.join('; ') + '.') + '</div>';
+                                    }
                                     if (files.length) {
                                         h += '<div style="margin-top:4px"><strong>Files changed (' + files.length + '):</strong></div>';
-                                        h += '<div>' + fileChipsHtml(files) + '</div>';
+                                        h += '<div>' + fileChipsHtml(files, runState.files, runState.preRunRef) + '</div>';
                                     }
                                     if (v) {
                                         h += '<div style="margin-top:4px"><strong>Verification:</strong> ' + escapeHtml(v.final_status || '') +
@@ -1960,6 +2251,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                                     h += '<span class="ws-item">' + (message.dirty > 0 ? '● ' + message.dirty + ' pending change(s)' : '✓ clean') + '</span>';
                                 }
                                 wsStrip.innerHTML = h;
+                                scheduleSaveState();
                                 break;
                             }
 
@@ -1969,6 +2261,22 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                             }
                         }
                     });
+
+                    // ── Polish: restore persisted view state before announcing ready ──
+                    try {
+                        if (persisted.html) {
+                            messagesDiv.innerHTML = persisted.html;
+                            // strip ids so stale live-run cards can't capture new events
+                            messagesDiv.querySelectorAll('[id]').forEach(el => el.removeAttribute('id'));
+                        }
+                        if (persisted.ws) { wsStrip.innerHTML = persisted.ws; }
+                        renderThreads();
+                        scrollToBottom();
+                        if (persisted.settingsOpen) {
+                            settingsView.classList.add('open');
+                            vscode.postMessage({ type: 'getSettingsInfo' });
+                        }
+                    } catch (e) { /* restore is best-effort */ }
 
                     // Notify extension that webview is ready
                     vscode.postMessage({ type: 'ready' });
@@ -2103,8 +2411,11 @@ export class ChatPanel implements vscode.WebviewViewProvider {
 
         // Echo the user's task into the chat exactly as typed
         this.post({ type: 'userMessage', message: task });
+        // Capture the pre-run git ref so summary chips can open diff previews
+        const repo = await this._getGitRepo();
+        const preRunRef = repo?.state?.HEAD?.commit ?? null;
         // Open a live streaming card in the webview
-        this.post({ type: 'streamRunStart', task });
+        this.post({ type: 'streamRunStart', task, preRunRef });
 
         const context = this.getCurrentContext();
         const { url, token } = this.apiClient.getStreamConfig();
@@ -2187,6 +2498,59 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         } catch {
             // file might not be in the current workspace — silently skip
         }
+    }
+
+    /**
+     * Serve pre-run file content for the agent-neo-prerun diff scheme.
+     * uri.path is "/<repo-relative-path>", uri.query is the git ref.
+     */
+    private async providePreRunContent(uri: vscode.Uri): Promise<string> {
+        try {
+            const repo = await this._getGitRepo();
+            const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!repo || !root || !uri.query) { return ''; }
+            const relPath = uri.path.replace(/^\//, '');
+            return await repo.show(uri.query, path.join(root, relPath));
+        } catch {
+            // file did not exist at the pre-run ref — empty left side
+            return '';
+        }
+    }
+
+    /**
+     * Open a diff of an edited file against its pre-run content when a
+     * pre-run git ref is known; fall back to opening the file normally.
+     */
+    private async _openDiff(relPath: string, ref?: string, oldPath?: string) {
+        try {
+            const folder = vscode.workspace.workspaceFolders?.[0];
+            if (!folder || !relPath) { return; }
+            const repo = await this._getGitRepo();
+            if (ref && repo) {
+                const fileUri = vscode.Uri.joinPath(folder.uri, relPath);
+                // For renames, the left side is the old path's pre-run content
+                const leftRel = oldPath || relPath;
+                const leftUri = vscode.Uri.from({
+                    scheme: 'agent-neo-prerun',
+                    path: '/' + leftRel.replace(/\\/g, '/'),
+                    query: ref,
+                });
+                const title = oldPath
+                    ? oldPath + ' → ' + relPath + ' (Agent NEO rename)'
+                    : relPath + ' (Agent NEO changes)';
+                if (fs.existsSync(fileUri.fsPath)) {
+                    await vscode.commands.executeCommand('vscode.diff', leftUri, fileUri, title);
+                } else {
+                    // file was deleted during the run — show the pre-run version
+                    const doc = await vscode.workspace.openTextDocument(leftUri);
+                    await vscode.window.showTextDocument(doc, { preview: true });
+                }
+                return;
+            }
+        } catch {
+            // diff unavailable — fall back to a plain open
+        }
+        await this._revealFile(relPath);
     }
 
     /**
