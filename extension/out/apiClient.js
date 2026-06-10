@@ -232,6 +232,78 @@ class ApiClient {
         const response = await this.client.get('/runs', { params: { limit } });
         return response.data;
     }
+    // ── External integrations: MCP servers + CLI tools ────────────────
+    /**
+     * List registered MCP servers ({ servers: [...] }).
+     */
+    async listMcpServers() {
+        const response = await this.client.get('/mcp/servers');
+        return response.data;
+    }
+    /**
+     * Register an MCP server (stdio command or remote HTTP URL).
+     */
+    async addMcpServer(server) {
+        const response = await this.client.post('/mcp/servers', server);
+        return response.data;
+    }
+    /**
+     * Partially update an MCP server registration.
+     */
+    async updateMcpServer(serverId, patch) {
+        const response = await this.client.patch(`/mcp/servers/${serverId}`, patch);
+        return response.data;
+    }
+    /**
+     * Remove an MCP server registration.
+     */
+    async removeMcpServer(serverId) {
+        const response = await this.client.delete(`/mcp/servers/${serverId}`);
+        return response.data;
+    }
+    /**
+     * Discover the server's tools (tools/list) — doubles as a health check.
+     */
+    async refreshMcpServer(serverId) {
+        const response = await this.client.post(`/mcp/servers/${serverId}/refresh`, {}, { timeout: 60000 });
+        return response.data;
+    }
+    /**
+     * Push secret values for a server's bindings. Values travel only in
+     * this request body and are held in backend memory only.
+     */
+    async setMcpSecrets(serverId, secrets) {
+        const response = await this.client.post(`/mcp/servers/${serverId}/secrets`, { secrets });
+        return response.data;
+    }
+    /**
+     * List registered CLI tools ({ tools: [...] }) with availability.
+     */
+    async listCliTools() {
+        const response = await this.client.get('/cli/tools');
+        return response.data;
+    }
+    /**
+     * Register a governed CLI tool.
+     */
+    async addCliTool(tool) {
+        const response = await this.client.post('/cli/tools', tool);
+        return response.data;
+    }
+    /**
+     * Partially update a CLI tool registration.
+     */
+    async updateCliTool(toolId, patch) {
+        const response = await this.client.patch(`/cli/tools/${toolId}`, patch);
+        return response.data;
+    }
+    /**
+     * Remove a CLI tool registration.
+     */
+    async removeCliTool(toolId) {
+        const response = await this.client.delete(`/cli/tools/${toolId}`);
+        return response.data;
+    }
     /**
      * Check API health.
      */

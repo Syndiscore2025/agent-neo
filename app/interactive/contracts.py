@@ -405,3 +405,38 @@ class RepoActivateRequest(BaseModel):
     """Request to mark a managed repo as the active one."""
     repo_id: str = Field(..., min_length=1)
 
+
+# ---------------------------------------------------------------------------
+# External integrations — MCP servers + governed CLI tools
+# ---------------------------------------------------------------------------
+
+class McpServerUpsertRequest(BaseModel):
+    """Create or update an MCP server registration (no secret values)."""
+    name: Optional[str] = None
+    transport: Optional[Literal["stdio", "http"]] = None
+    command: Optional[str] = None
+    args: Optional[List[str]] = None
+    url: Optional[str] = None
+    env: Optional[Dict[str, str]] = None
+    # Binding name → secret reference (values live in SecretStorage / backend env)
+    secret_env: Optional[Dict[str, str]] = None
+    headers: Optional[Dict[str, str]] = None
+    enabled: Optional[bool] = None
+    description: Optional[str] = None
+
+
+class McpSecretsRequest(BaseModel):
+    """Push secret values for an MCP server (held in memory only)."""
+    secrets: Dict[str, str] = Field(default_factory=dict)
+
+
+class CliToolUpsertRequest(BaseModel):
+    """Create or update a governed CLI tool registration."""
+    name: Optional[str] = None
+    executable: Optional[str] = None
+    default_args: Optional[List[str]] = None
+    allowed_subcommands: Optional[List[str]] = None
+    enabled: Optional[bool] = None
+    timeout: Optional[int] = None
+    description: Optional[str] = None
+

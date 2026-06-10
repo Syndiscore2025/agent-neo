@@ -8,6 +8,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { ApiClient } from './apiClient';
 import { NeoStorage } from './storage';
+import { IntegrationsManager } from './integrations';
 
 export class ChatPanel implements vscode.WebviewViewProvider {
     public static readonly viewId = 'agent-neo.chatView';
@@ -19,12 +20,14 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     private workspaceInfoTimer: ReturnType<typeof setTimeout> | undefined;
     private apiClient: ApiClient;
     private storage: NeoStorage;
+    private integrations: IntegrationsManager;
     private sessionId: string | undefined;
     private selectedModel: string = ''; // empty → backend DEFAULT_MODEL
 
     constructor(private context: vscode.ExtensionContext) {
         this.apiClient = new ApiClient();
         this.storage = new NeoStorage(context);
+        this.integrations = new IntegrationsManager(this.apiClient, this.storage);
         vscode.window.onDidCloseTerminal(t => {
             if (t === this.terminal) { this.terminal = undefined; }
         }, undefined, context.subscriptions);
@@ -216,6 +219,14 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                 break;
             case 'clearGitHubToken':
                 await vscode.commands.executeCommand('agent-neo.clearGitHubToken');
+                await this.handleGetSettingsInfo();
+                break;
+            case 'manageMcpServers':
+                await vscode.commands.executeCommand('agent-neo.manageMcpServers');
+                await this.handleGetSettingsInfo();
+                break;
+            case 'manageCliTools':
+                await vscode.commands.executeCommand('agent-neo.manageCliTools');
                 await this.handleGetSettingsInfo();
                 break;
         }
@@ -1362,6 +1373,8 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                         else if (action === 'manageRepos') { vscode.postMessage({ type: 'manageRepos' }); }
                         else if (action === 'setGitHubToken') { vscode.postMessage({ type: 'setGitHubToken' }); }
                         else if (action === 'clearGitHubToken') { vscode.postMessage({ type: 'clearGitHubToken' }); }
+                        else if (action === 'manageMcpServers') { vscode.postMessage({ type: 'manageMcpServers' }); }
+                        else if (action === 'manageCliTools') { vscode.postMessage({ type: 'manageCliTools' }); }
                     });
 
                     // Delegated clicks: file chips open files (or diffs), ▶ buttons run commands
@@ -1391,6 +1404,44 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                             (info.healthy ? '<span class="settings-pill ok">connected</span>' : '<span class="settings-pill err">unreachable</span>') + '</div>';
                         h += '<div class="settings-row"><span class="sr-key">API token</span><span>' + (info.tokenSet ? 'configured' : 'not set') + '</span></div>';
                         h += '<div class="settings-row"><button class="settings-btn" data-action="vscodeSettings">Open VS Code settings</button></div>';
+                        h += '</div>';
+
+                        h += '<div class="settings-section"><h3>MCP servers</h3>';
+                        const mcps = info.mcpServers || [];
+                        if (mcps.length) {
+                            mcps.forEach(s => {
+                                h += '<div class="settings-row"><span class="sr-key">' + escapeHtml(s.name || '') + '</span>' +
+                                    (s.enabled ? '<span class="settings-pill ok">enabled</span>' : '<span class="settings-pill err">disabled</span>') + '</div>';
+                                const meta = [];
+                                meta.push(s.transport === 'http' ? 'remote (HTTP)' : 'local (stdio)');
+                                if (s.last_refresh_ok === true) { meta.push('✓ ' + (s.tools || []).length + ' tool(s)'); }
+                                else if (s.last_refresh_ok === false) { meta.push('✗ ' + (s.last_refresh_error || 'unreachable')); }
+                                else { meta.push('not tested yet'); }
+                                const bindings = Object.keys(s.secret_env || {});
+                                if (bindings.length) { meta.push('secrets: ' + bindings.join(', ')); }
+                                h += '<div class="settings-row"><span class="sr-key" style="opacity:.55;font-size:11px">' + escapeHtml(meta.join('  ·  ')) + '</span></div>';
+                            });
+                        } else {
+                            h += '<div class="settings-row"><span class="sr-key">No MCP servers yet — add a local (stdio) or remote (HTTP) server.</span></div>';
+                        }
+                        h += '<div class="settings-row"><button class="settings-btn" data-action="manageMcpServers">Manage MCP servers…</button></div>';
+                        h += '</div>';
+
+                        h += '<div class="settings-section"><h3>CLI tools</h3>';
+                        const clis = info.cliTools || [];
+                        if (clis.length) {
+                            clis.forEach(t => {
+                                h += '<div class="settings-row"><span class="sr-key">' + escapeHtml(t.name || '') + '</span>' +
+                                    (t.enabled ? '<span class="settings-pill ok">enabled</span>' : '<span class="settings-pill err">disabled</span>') + '</div>';
+                                const meta = [];
+                                meta.push(t.available ? '✓ available' : '✗ not on PATH');
+                                meta.push((t.allowed_subcommands || []).length ? 'allowlist: ' + t.allowed_subcommands.join(', ') : 'all subcommands');
+                                h += '<div class="settings-row"><span class="sr-key" style="opacity:.55;font-size:11px">' + escapeHtml(meta.join('  ·  ')) + '</span></div>';
+                            });
+                        } else {
+                            h += '<div class="settings-row"><span class="sr-key">No CLI tools yet — register one to expose it to the agent (governed, never a raw shell).</span></div>';
+                        }
+                        h += '<div class="settings-row"><button class="settings-btn" data-action="manageCliTools">Manage CLI tools…</button></div>';
                         h += '</div>';
                         sections.integrations = h;
                         h = '';
@@ -2783,6 +2834,17 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         }
         const githubTokenSet = await this.storage.hasGitHubToken();
 
+        // External integrations (best-effort; re-sync secrets into backend memory)
+        let mcpServers: any[] = [];
+        let cliTools: any[] = [];
+        try {
+            mcpServers = (await this.apiClient.listMcpServers())?.servers ?? [];
+            cliTools = (await this.apiClient.listCliTools())?.tools ?? [];
+            void this.integrations.syncMcpSecrets(mcpServers);
+        } catch {
+            // backend unreachable — Integrations tab shows an empty state
+        }
+
         this.post({
             type: 'settingsInfo',
             apiUrl: config.get('apiUrl', 'http://127.0.0.1:8000'),
@@ -2799,6 +2861,8 @@ export class ChatPanel implements vscode.WebviewViewProvider {
             managedRepos,
             activeRepoId,
             githubTokenSet,
+            mcpServers,
+            cliTools,
         });
     }
 

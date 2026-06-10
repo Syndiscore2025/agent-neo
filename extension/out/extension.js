@@ -46,6 +46,7 @@ const commands_1 = require("./commands");
 const statusBar_1 = require("./statusBar");
 const storage_1 = require("./storage");
 const repos_1 = require("./repos");
+const integrations_1 = require("./integrations");
 const apiClient_1 = require("./apiClient");
 let chatPanel;
 let completionProvider;
@@ -75,9 +76,11 @@ function activate(context) {
     }
     // Storage split (globalState + SecretStorage) and managed repo flows
     const storage = new storage_1.NeoStorage(context);
-    const repoManager = new repos_1.RepoManager(new apiClient_1.ApiClient(), storage);
+    const apiClient = new apiClient_1.ApiClient();
+    const repoManager = new repos_1.RepoManager(apiClient, storage);
+    const integrationsManager = new integrations_1.IntegrationsManager(apiClient, storage);
     // Register commands
-    (0, commands_1.registerCommands)(context, chatPanel, statusBar, storage, repoManager);
+    (0, commands_1.registerCommands)(context, chatPanel, statusBar, storage, repoManager, integrationsManager);
     console.log('Agent NEO extension activated');
 }
 /**

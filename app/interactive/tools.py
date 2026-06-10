@@ -149,6 +149,16 @@ def get_filtered_schemas(tool_names: list[str]) -> list[dict]:
     return [s for s in TOOL_SCHEMAS if s["name"] in names_set]
 
 
+def get_integration_schemas() -> list[dict]:
+    """Tool schemas for ENABLED MCP/CLI integrations (best-effort)."""
+    try:
+        from app.modules.integrations import get_integrations_registry
+        return get_integrations_registry().get_tool_schemas()
+    except Exception as exc:
+        logger.warning(f"Integration schemas unavailable: {exc}")
+        return []
+
+
 class ToolExecutor:
     """Executes agent tool calls against the real filesystem and shell."""
 
@@ -172,6 +182,16 @@ class ToolExecutor:
         }
         fn = dispatch.get(tool_name)
         if not fn:
+            # Integration-backed tools (MCP servers / governed CLI tools)
+            if tool_name.startswith("mcp__") or tool_name.startswith("cli__"):
+                try:
+                    from app.modules.integrations import get_integrations_registry
+                    return get_integrations_registry().execute_tool(
+                        tool_name, tool_input, str(self.repo_path)
+                    )
+                except Exception as exc:
+                    logger.error(f"Integration tool {tool_name} raised: {exc}", exc_info=True)
+                    return f"[error] {tool_name} failed: {exc}"
             return f"[error] Unknown tool: {tool_name}"
         try:
             return fn(tool_input)

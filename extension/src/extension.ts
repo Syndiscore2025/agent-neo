@@ -10,6 +10,7 @@ import { registerCommands } from './commands';
 import { StatusBarManager } from './statusBar';
 import { NeoStorage } from './storage';
 import { RepoManager } from './repos';
+import { IntegrationsManager } from './integrations';
 import { ApiClient } from './apiClient';
 
 let chatPanel: ChatPanel | undefined;
@@ -51,10 +52,12 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Storage split (globalState + SecretStorage) and managed repo flows
     const storage = new NeoStorage(context);
-    const repoManager = new RepoManager(new ApiClient(), storage);
+    const apiClient = new ApiClient();
+    const repoManager = new RepoManager(apiClient, storage);
+    const integrationsManager = new IntegrationsManager(apiClient, storage);
 
     // Register commands
-    registerCommands(context, chatPanel, statusBar, storage, repoManager);
+    registerCommands(context, chatPanel, statusBar, storage, repoManager, integrationsManager);
 
     console.log('Agent NEO extension activated');
 }

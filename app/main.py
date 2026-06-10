@@ -62,6 +62,9 @@ from app.interactive.contracts import (
     RepoAttachRequest,
     RepoCloneRequest,
     RepoActivateRequest,
+    McpServerUpsertRequest,
+    McpSecretsRequest,
+    CliToolUpsertRequest,
 )
 from app.interactive.orchestrator import get_orchestrator
 from app.interactive.session_manager import get_session_manager
@@ -853,6 +856,123 @@ async def list_run_history(limit: int = 20, _: str = Depends(verify_bearer_token
     """Durable run summaries recorded from streaming runs (newest first)."""
     from app.modules.managed_repos import get_managed_repo_registry
     return {"runs": get_managed_repo_registry().list_runs(limit)}
+
+
+# ============================================================================
+# EXTERNAL INTEGRATIONS — MCP servers + governed CLI tools
+# ============================================================================
+
+@app.get("/mcp/servers")
+async def list_mcp_servers(_: str = Depends(verify_bearer_token)):
+    """List registered MCP servers (secret refs only, never values)."""
+    from app.modules.integrations import get_integrations_registry
+    return {"servers": get_integrations_registry().list_mcp_servers()}
+
+
+@app.post("/mcp/servers")
+async def add_mcp_server(request: McpServerUpsertRequest, _: str = Depends(verify_bearer_token)):
+    """Register an MCP server (stdio command or remote HTTP URL)."""
+    from app.modules.integrations import get_integrations_registry
+    try:
+        return get_integrations_registry().add_mcp_server(
+            request.model_dump(exclude_unset=True)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.patch("/mcp/servers/{server_id}")
+async def update_mcp_server(
+    server_id: str, request: McpServerUpsertRequest, _: str = Depends(verify_bearer_token)
+):
+    """Update an MCP server registration (partial — only provided fields)."""
+    from app.modules.integrations import get_integrations_registry
+    try:
+        server = get_integrations_registry().update_mcp_server(
+            server_id, request.model_dump(exclude_unset=True)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not server:
+        raise HTTPException(status_code=404, detail="MCP server not found")
+    return server
+
+
+@app.delete("/mcp/servers/{server_id}")
+async def remove_mcp_server(server_id: str, _: str = Depends(verify_bearer_token)):
+    """Remove an MCP server registration (and any cached secrets)."""
+    from app.modules.integrations import get_integrations_registry
+    if not get_integrations_registry().remove_mcp_server(server_id):
+        raise HTTPException(status_code=404, detail="MCP server not found")
+    return {"removed": server_id}
+
+
+@app.post("/mcp/servers/{server_id}/refresh")
+async def refresh_mcp_server(server_id: str, _: str = Depends(verify_bearer_token)):
+    """Discover the server's tools (tools/list) — doubles as a health check."""
+    from app.modules.integrations import get_integrations_registry
+    server = await asyncio.to_thread(
+        get_integrations_registry().refresh_mcp_server, server_id
+    )
+    if not server:
+        raise HTTPException(status_code=404, detail="MCP server not found")
+    return server
+
+
+@app.post("/mcp/servers/{server_id}/secrets")
+async def set_mcp_secrets(
+    server_id: str, request: McpSecretsRequest, _: str = Depends(verify_bearer_token)
+):
+    """Push secret values for a server's bindings (held in memory only)."""
+    from app.modules.integrations import get_integrations_registry
+    if not get_integrations_registry().set_mcp_secrets(server_id, request.secrets):
+        raise HTTPException(status_code=404, detail="MCP server not found")
+    return {"ok": True, "bindings": sorted(request.secrets.keys())}
+
+
+@app.get("/cli/tools")
+async def list_cli_tools(_: str = Depends(verify_bearer_token)):
+    """List registered CLI tools with availability (PATH check)."""
+    from app.modules.integrations import get_integrations_registry
+    return {"tools": get_integrations_registry().list_cli_tools()}
+
+
+@app.post("/cli/tools")
+async def add_cli_tool(request: CliToolUpsertRequest, _: str = Depends(verify_bearer_token)):
+    """Register a governed CLI tool (argv execution, no shell)."""
+    from app.modules.integrations import get_integrations_registry
+    try:
+        return get_integrations_registry().add_cli_tool(
+            request.model_dump(exclude_unset=True)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.patch("/cli/tools/{tool_id}")
+async def update_cli_tool(
+    tool_id: str, request: CliToolUpsertRequest, _: str = Depends(verify_bearer_token)
+):
+    """Update a CLI tool registration (partial — only provided fields)."""
+    from app.modules.integrations import get_integrations_registry
+    try:
+        tool = get_integrations_registry().update_cli_tool(
+            tool_id, request.model_dump(exclude_unset=True)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not tool:
+        raise HTTPException(status_code=404, detail="CLI tool not found")
+    return tool
+
+
+@app.delete("/cli/tools/{tool_id}")
+async def remove_cli_tool(tool_id: str, _: str = Depends(verify_bearer_token)):
+    """Remove a CLI tool registration."""
+    from app.modules.integrations import get_integrations_registry
+    if not get_integrations_registry().remove_cli_tool(tool_id):
+        raise HTTPException(status_code=404, detail="CLI tool not found")
+    return {"removed": tool_id}
 
 
 @app.post("/chat", response_model=ChatResponse)

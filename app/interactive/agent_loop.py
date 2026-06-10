@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
 from app.interactive.change_set import ChangeSet
-from app.interactive.tools import ToolExecutor, TOOL_SCHEMAS, get_filtered_schemas
+from app.interactive.tools import (
+    ToolExecutor, TOOL_SCHEMAS, get_filtered_schemas, get_integration_schemas,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +96,8 @@ class AgentLoop:
         self.last_change_set = executor.change_set
         tool_calls_log: list[ToolCall] = []
         system = system_override or self._build_system()
-        tools = get_filtered_schemas(tool_subset) if tool_subset else TOOL_SCHEMAS
+        base_tools = get_filtered_schemas(tool_subset) if tool_subset else TOOL_SCHEMAS
+        tools = base_tools + get_integration_schemas()
         limit = max_iterations_override or MAX_ITERATIONS
 
         user_content = self._build_task_message(task, context)
@@ -216,7 +219,8 @@ class AgentLoop:
         self.last_change_set = executor.change_set
         tool_calls_log: list[ToolCall] = []
         system = system_override or self._build_system()
-        tools = get_filtered_schemas(tool_subset) if tool_subset else TOOL_SCHEMAS
+        base_tools = get_filtered_schemas(tool_subset) if tool_subset else TOOL_SCHEMAS
+        tools = base_tools + get_integration_schemas()
         limit = max_iterations_override or MAX_ITERATIONS
 
         user_content = self._build_task_message(task, context)

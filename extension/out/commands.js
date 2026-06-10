@@ -42,7 +42,7 @@ const vscode = __importStar(require("vscode"));
 /**
  * Register all extension commands.
  */
-function registerCommands(context, chatPanel, statusBar, storage, repoManager) {
+function registerCommands(context, chatPanel, statusBar, storage, repoManager, integrationsManager) {
     // Open Chat
     context.subscriptions.push(vscode.commands.registerCommand('agent-neo.openChat', () => {
         chatPanel.show();
@@ -147,6 +147,14 @@ function registerCommands(context, chatPanel, statusBar, storage, repoManager) {
     context.subscriptions.push(vscode.commands.registerCommand('agent-neo.clearGitHubToken', async () => {
         await storage.clearGitHubToken();
         vscode.window.showInformationMessage('GitHub token cleared.');
+    }));
+    // MCP servers: list / add (stdio or HTTP) / test / secrets / remove
+    context.subscriptions.push(vscode.commands.registerCommand('agent-neo.manageMcpServers', async () => {
+        await integrationsManager.manageMcpServers();
+    }));
+    // Governed CLI tools: register / allowlist / enable / remove
+    context.subscriptions.push(vscode.commands.registerCommand('agent-neo.manageCliTools', async () => {
+        await integrationsManager.manageCliTools();
     }));
 }
 //# sourceMappingURL=commands.js.map

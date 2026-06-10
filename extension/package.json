@@ -57,6 +57,14 @@
       {
         "command": "agent-neo.clearGitHubToken",
         "title": "Agent NEO: Clear GitHub Token"
+      },
+      {
+        "command": "agent-neo.manageMcpServers",
+        "title": "Agent NEO: Manage MCP Servers"
+      },
+      {
+        "command": "agent-neo.manageCliTools",
+        "title": "Agent NEO: Manage CLI Tools"
       }
     ],
     "viewsContainers": {

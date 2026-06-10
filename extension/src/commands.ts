@@ -8,6 +8,7 @@ import { ChatPanel } from './chatPanel';
 import { StatusBarManager } from './statusBar';
 import { NeoStorage } from './storage';
 import { RepoManager } from './repos';
+import { IntegrationsManager } from './integrations';
 
 /**
  * Register all extension commands.
@@ -17,7 +18,8 @@ export function registerCommands(
     chatPanel: ChatPanel,
     statusBar: StatusBarManager,
     storage: NeoStorage,
-    repoManager: RepoManager
+    repoManager: RepoManager,
+    integrationsManager: IntegrationsManager
 ) {
     // Open Chat
     context.subscriptions.push(
@@ -158,6 +160,20 @@ export function registerCommands(
         vscode.commands.registerCommand('agent-neo.clearGitHubToken', async () => {
             await storage.clearGitHubToken();
             vscode.window.showInformationMessage('GitHub token cleared.');
+        })
+    );
+
+    // MCP servers: list / add (stdio or HTTP) / test / secrets / remove
+    context.subscriptions.push(
+        vscode.commands.registerCommand('agent-neo.manageMcpServers', async () => {
+            await integrationsManager.manageMcpServers();
+        })
+    );
+
+    // Governed CLI tools: register / allowlist / enable / remove
+    context.subscriptions.push(
+        vscode.commands.registerCommand('agent-neo.manageCliTools', async () => {
+            await integrationsManager.manageCliTools();
         })
     );
 }
