@@ -10,6 +10,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from app.interactive.change_set import ChangeSet
+
 logger = logging.getLogger(__name__)
 
 # ── Security blocklist ────────────────────────────────────────────────────────
@@ -42,6 +44,29 @@ TOOL_SCHEMAS = [
                 "content": {"type": "string", "description": "Full file content to write"}
             },
             "required": ["path", "content"]
+        }
+    },
+    {
+        "name": "delete_file",
+        "description": "Delete a file from the repository. Only use when the task explicitly requires removing a file.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative path from repo root"}
+            },
+            "required": ["path"]
+        }
+    },
+    {
+        "name": "rename_file",
+        "description": "Rename or move a file within the repository.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "old_path": {"type": "string", "description": "Current relative path from repo root"},
+                "new_path": {"type": "string", "description": "New relative path from repo root"}
+            },
+            "required": ["old_path", "new_path"]
         }
     },
     {
@@ -130,14 +155,14 @@ class ToolExecutor:
     def __init__(self, repo_path: str):
         self.repo_path = Path(repo_path).resolve()
         self.files_written: list[str] = []
-        self._embed_model = None   # lazy-loaded sentence-transformers model
-        self._embed_index: list[dict] = []  # [{path, chunk, embedding}]
-        self._embed_ready = False
+        self.change_set = ChangeSet()
 
     def execute(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         dispatch = {
             "read_file": self._read_file,
             "write_file": self._write_file,
+            "delete_file": self._delete_file,
+            "rename_file": self._rename_file,
             "list_dir": self._list_dir,
             "run_command": self._run_command,
             "search_code": self._search_code,
@@ -177,10 +202,46 @@ class ToolExecutor:
     def _write_file(self, inp: dict) -> str:
         rel = inp["path"].lstrip("/\\")
         full = self.repo_path / rel
+        existed_before = full.exists()
+        try:
+            old_content = full.read_text(encoding="utf-8", errors="replace") if existed_before else ""
+        except Exception:
+            old_content = ""
         full.parent.mkdir(parents=True, exist_ok=True)
         full.write_text(inp["content"], encoding="utf-8")
         self.files_written.append(rel)
+        self.change_set.record(rel, old_content, inp["content"], existed_before=existed_before)
         return f"[ok] Written {rel} ({len(inp['content'])} chars)"
+
+    def _delete_file(self, inp: dict) -> str:
+        rel = inp["path"].lstrip("/\\")
+        full = self.repo_path / rel
+        if not full.exists():
+            return f"[error] File not found: {rel}"
+        if not full.is_file():
+            return f"[error] Not a file: {rel}"
+        old_content = full.read_text(encoding="utf-8", errors="replace")
+        full.unlink()
+        self.change_set.record_delete(rel, old_content)
+        return f"[ok] Deleted {rel}"
+
+    def _rename_file(self, inp: dict) -> str:
+        old_rel = inp["old_path"].lstrip("/\\")
+        new_rel = inp["new_path"].lstrip("/\\")
+        old_full = self.repo_path / old_rel
+        new_full = self.repo_path / new_rel
+        if not old_full.exists():
+            return f"[error] File not found: {old_rel}"
+        if not old_full.is_file():
+            return f"[error] Not a file: {old_rel}"
+        if new_full.exists():
+            return f"[error] Target already exists: {new_rel}"
+        content = old_full.read_text(encoding="utf-8", errors="replace")
+        new_full.parent.mkdir(parents=True, exist_ok=True)
+        old_full.rename(new_full)
+        self.files_written.append(new_rel)
+        self.change_set.record_rename(old_rel, new_rel, content)
+        return f"[ok] Renamed {old_rel} -> {new_rel}"
 
     def _list_dir(self, inp: dict) -> str:
         rel = inp.get("path", ".").lstrip("/\\") or "."
@@ -256,70 +317,23 @@ class ToolExecutor:
         query = inp["query"]
         top_k = int(inp.get("top_k", 8))
 
-        # Try embedding-based search first
+        # Use the shared per-repo index (semantic with keyword fallback inside)
         try:
-            import numpy as np
-            from sentence_transformers import SentenceTransformer
-
-            if not self._embed_ready:
-                self._build_embedding_index()
-
-            if self._embed_index and self._embed_model:
-                q_emb = self._embed_model.encode([query], normalize_embeddings=True)[0]
-                scored = []
-                for entry in self._embed_index:
-                    sim = float(np.dot(q_emb, entry["embedding"]))
-                    scored.append((sim, entry))
-                scored.sort(key=lambda x: x[0], reverse=True)
-                results = []
-                for sim, entry in scored[:top_k]:
-                    results.append(f"[{entry['path']}] (score={sim:.2f})\n{entry['chunk'][:200]}")
-                return "\n---\n".join(results) if results else "[no semantic matches]"
-        except ImportError:
-            pass  # fall through to keyword fallback
+            from app.modules.repo_index import get_repo_index
+            index = get_repo_index(str(self.repo_path))
+            results = index.search(query, k=top_k)
+            if results:
+                return "\n---\n".join(
+                    f"[{r['path']}] ({r['reason']})\n{r['snippet'][:200]}"
+                    for r in results
+                )
         except Exception as exc:
-            logger.warning(f"Semantic search embedding failed: {exc}, falling back to keyword")
+            logger.warning(f"RepoIndex search failed: {exc}, falling back to keyword")
 
-        # Fallback: keyword search on the query words
+        # Last-resort fallback: regex keyword search on the query words
         keywords = [w for w in query.split() if len(w) > 3]
         if not keywords:
             return "[semantic_search: query too short for fallback]"
         fallback_pattern = "|".join(re.escape(k) for k in keywords[:5])
         return self._search_code({"pattern": fallback_pattern})
-
-    def _build_embedding_index(self):
-        """Build a chunk-level embedding index over the repo (lazy, one-time)."""
-        try:
-            from sentence_transformers import SentenceTransformer
-            logger.info("Building semantic embedding index…")
-            self._embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-            chunks = []
-            for fpath in self.repo_path.rglob("*"):
-                if not fpath.is_file():
-                    continue
-                if any(p in fpath.parts for p in _SKIP_DIRS):
-                    continue
-                if fpath.suffix not in {".py", ".ts", ".js", ".tsx", ".jsx", ".go", ".rs", ".md"}:
-                    continue
-                try:
-                    text = fpath.read_text(encoding="utf-8", errors="replace")
-                    lines = text.splitlines()
-                    rel = str(fpath.relative_to(self.repo_path))
-                    for i in range(0, len(lines), 40):
-                        chunk = "\n".join(lines[i:i + 40])
-                        if chunk.strip():
-                            chunks.append({"path": rel, "chunk": chunk})
-                except Exception:
-                    continue
-            if chunks:
-                texts = [c["chunk"] for c in chunks]
-                embeddings = self._embed_model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
-                for c, emb in zip(chunks, embeddings):
-                    c["embedding"] = emb
-                self._embed_index = chunks
-                logger.info(f"Embedding index built: {len(chunks)} chunks")
-            self._embed_ready = True
-        except Exception as exc:
-            logger.warning(f"Could not build embedding index: {exc}")
-            self._embed_ready = True  # don't retry
 

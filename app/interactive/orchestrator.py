@@ -25,6 +25,8 @@ from app.interactive.contracts import (
     AutoRunRequest,
     AutoRunResponse,
     AutoRunStep,
+    ContextPack,
+    VerificationSummary,
 )
 from app.interactive.session_manager import get_session_manager
 from app.interactive.model_router import get_model_router
@@ -211,31 +213,29 @@ class InteractiveOrchestrator:
         """
         parts = []
 
-        # Add system context
-        parts.append("You are Agent NEO, an AI coding assistant with access to a repository.")
-        parts.append("You help with code explanation, refactoring, testing, and modifications.")
+        # ── Action-first system prompt ────────────────────────────────────────
+        parts.append("You are Agent NEO — an autonomous AI coding agent, not a chatbot.")
         parts.append("")
-
-        # Add diff generation instructions for modification intents
-        if intent in ["modify", "generate_tests"]:
-            parts.append("IMPORTANT: When making code changes, provide your response in this format:")
-            parts.append("1. Brief explanation of what you're changing and why")
-            parts.append("2. The changes in unified diff format inside a ```diff code block")
-            parts.append("")
-            parts.append("Diff format example:")
-            parts.append("```diff")
-            parts.append("--- a/path/to/file.py")
-            parts.append("+++ b/path/to/file.py")
-            parts.append("@@ -10,3 +10,4 @@")
-            parts.append(" unchanged line")
-            parts.append("-old line")
-            parts.append("+new line")
-            parts.append("+added line")
-            parts.append("```")
-            parts.append("")
-        else:
-            parts.append("When proposing code changes, explain what you're doing and why.")
-            parts.append("")
+        parts.append("CRITICAL RULES — follow these without exception:")
+        parts.append("1. NEVER say 'Let me know how you'd like to proceed' or any variant.")
+        parts.append("2. NEVER acknowledge a request and wait. START WORKING IMMEDIATELY.")
+        parts.append("3. NEVER ask clarifying questions unless a required value is truly unknowable.")
+        parts.append("4. When given a task, requirement, or description — execute it. Read the relevant")
+        parts.append("   files, write the code, apply the changes. Don't narrate. Do.")
+        parts.append("5. If you propose a code change, include the FULL unified diff in a ```diff block.")
+        parts.append("6. After making changes, briefly summarise what was done (past tense, factual).")
+        parts.append("7. Pure questions (no code involved) get a direct, concise answer — no preamble.")
+        parts.append("")
+        parts.append("Diff format when making changes:")
+        parts.append("```diff")
+        parts.append("--- a/path/to/file.ext")
+        parts.append("+++ b/path/to/file.ext")
+        parts.append("@@ -10,3 +10,4 @@")
+        parts.append(" unchanged line")
+        parts.append("-removed line")
+        parts.append("+added line")
+        parts.append("```")
+        parts.append("")
 
         # Add repository context
         if context.get("repo_summary"):
@@ -556,6 +556,25 @@ class InteractiveOrchestrator:
     # ------------------------------------------------------------------
     # Autonomous task runner — Augment-style agentic ReAct loop
     # ------------------------------------------------------------------
+    def _attach_context_pack(
+        self, context: dict, task: str, chat_context
+    ) -> Optional[ContextPack]:
+        """
+        Build a task-aware context pack and attach machine-readable summaries
+        to the context dict consumed by the planner and agent prompts.
+        Never raises — context selection must not break a run.
+        """
+        try:
+            pack = self.context_engine.build_context_pack(task, chat_context)
+        except Exception as exc:
+            logger.warning(f"Context pack unavailable: {exc}")
+            return None
+        context["context_summary"] = pack.summary
+        context["context_files_with_reasons"] = [
+            f.model_dump() for f in pack.primary_files + pack.supporting_files
+        ]
+        return pack
+
     async def handle_auto_run(self, request: AutoRunRequest) -> AutoRunResponse:
         """
         Execute a task using a true tool-calling ReAct agent.
@@ -576,6 +595,7 @@ class InteractiveOrchestrator:
             session_id = self.session_manager.create_session(request.context)
 
         context = self.context_engine.gather_context(request.context)
+        pack = self._attach_context_pack(context, request.task, request.context)
 
         repo_path = (
             getattr(request.context, "workspace_path", None)
@@ -601,12 +621,62 @@ class InteractiveOrchestrator:
         total_ms = int((time.monotonic() - t_start) * 1000)
         steps = self._agent_result_to_steps(result, total_ms)
 
-        # Commit any files the agent wrote
+        # System-controlled verification + bounded repair before any commit
+        verification: Optional[VerificationSummary] = None
+        if result.change_set and not result.change_set.is_empty():
+            from app.interactive.verifier import Verifier
+
+            verifier = Verifier(repo_path)
+            t_verify = time.monotonic()
+            async for _ in verifier.verify_and_repair(
+                task=request.task,
+                change_set=result.change_set,
+                context=context,
+                model_router=self.model_router,
+            ):
+                pass
+            verify_ms = int((time.monotonic() - t_verify) * 1000)
+            report = verifier.last_report
+            if report:
+                verification = self._verification_summary(report)
+                steps.append(AutoRunStep(
+                    step_name="verify",
+                    status="success" if report.passed else "failed",
+                    message=(
+                        f"Checks: {', '.join(report.checks_run) or 'none detected'}"
+                        + ("" if report.passed
+                           else f" — {report.last_failure_summary}")
+                    ),
+                    duration_ms=verify_ms,
+                ))
+
+        # Gate + commit the agent's staged change set (never `git add -A`)
         result_card: Optional[ExecutionResultCard] = None
-        if result.files_written:
-            result_card = self._commit_agent_changes(session_id, request.task, result, repo_path)
+        if verification and not verification.passed:
+            reverted = False
+            try:
+                result.change_set.revert(repo_path)
+                reverted = True
+            except Exception as exc:
+                logger.error(
+                    f"Failed to revert ChangeSet after failed verification: {exc}",
+                    exc_info=True,
+                )
+            result_card = ExecutionResultCard(
+                status="Broken",
+                mode="CRITICAL",
+                files_changed=result.change_set.paths,
+                error=f"Verification failed: {verification.last_failure_summary}",
+                reverted=reverted,
+            )
+        elif result.change_set and not result.change_set.is_empty():
+            result_card = self._commit_agent_changes(
+                session_id, request.task, result.change_set, repo_path
+            )
 
         overall = "success" if result.success else "failed"
+        if result_card and result_card.status == "Broken":
+            overall = "failed"
         summary = result.summary
 
         self.session_manager.add_message(session_id, ChatMessage(
@@ -620,6 +690,9 @@ class InteractiveOrchestrator:
             overall_status=overall,
             summary=summary,
             execution_result=result_card,
+            context_summary=pack.summary if pack else None,
+            context_files=(pack.primary_files + pack.supporting_files) if pack else [],
+            verification=verification,
         )
 
     async def stream_auto_run(self, request: AutoRunRequest):
@@ -640,6 +713,14 @@ class InteractiveOrchestrator:
         if request.context and getattr(request.context, "diagnostics", None):
             context["diagnostics"] = request.context.diagnostics
 
+        pack = self._attach_context_pack(context, request.task, request.context)
+        if pack:
+            yield {
+                "type": "context_ready",
+                "summary": pack.summary,
+                "files": context["context_files_with_reasons"],
+            }
+
         repo_path = (
             getattr(request.context, "workspace_path", None)
             or getattr(self.engine, "repo_path", None)
@@ -647,26 +728,64 @@ class InteractiveOrchestrator:
         )
         agent = AgentLoop(model_router=self.model_router, repo_path=repo_path)
 
-        files_written: list[str] = []
         try:
             async for event in agent.run_stream(task=request.task, context=context):
-                if event.get("type") == "finish":
-                    files_written = event.get("files") or []
                 yield event
         except Exception as exc:
             logger.error(f"stream_auto_run error: {exc}", exc_info=True)
             yield {"type": "error", "error": str(exc)}
             return
 
-        # Commit whatever was written
-        if files_written:
-            card = self._commit_agent_changes(session_id, request.task,
-                                              type("_R", (), {"files_written": files_written,
-                                                              "success": True,
-                                                              "summary": ""})(),
-                                              repo_path)
-            if card and card.commit_sha:
-                yield {"type": "commit", "sha": card.commit_sha, "files": files_written}
+        # Verification + bounded repair, then gated commit (never `git add -A`)
+        change_set = agent.last_change_set
+        if change_set and not change_set.is_empty():
+            from app.interactive.verifier import Verifier
+
+            verifier = Verifier(repo_path)
+            async for v_event in verifier.verify_and_repair(
+                task=request.task,
+                change_set=change_set,
+                context=context,
+                model_router=self.model_router,
+            ):
+                yield v_event
+
+            report = verifier.last_report
+            if report and not report.passed:
+                reverted = False
+                try:
+                    change_set.revert(repo_path)
+                    reverted = True
+                except Exception as exc:
+                    logger.error(
+                        f"Failed to revert ChangeSet after failed verification: {exc}",
+                        exc_info=True,
+                    )
+                yield {
+                    "type": "run_halted",
+                    "reason": (
+                        f"Verification failed after "
+                        f"{report.repair_attempts} repair attempt(s)"
+                    ),
+                    "reverted": reverted,
+                }
+            else:
+                card = self._commit_agent_changes(session_id, request.task, change_set, repo_path)
+                if card and card.status == "Broken":
+                    yield {
+                        "type": "change_set_blocked",
+                        "files": change_set.paths,
+                        "errors": card.error,
+                        "reverted": card.reverted,
+                    }
+                elif card and card.commit_sha:
+                    yield {
+                        "type": "commit",
+                        "sha": card.commit_sha,
+                        "files": change_set.paths,
+                    }
+        else:
+            yield {"type": "no_changes"}
 
         self.session_manager.add_message(session_id, ChatMessage(
             role="assistant", content=f"[AutoRun stream] {request.task}"
@@ -695,6 +814,14 @@ class InteractiveOrchestrator:
         context = self.context_engine.gather_context(request.context)
         if request.context and getattr(request.context, "diagnostics", None):
             context["diagnostics"] = request.context.diagnostics
+
+        pack = self._attach_context_pack(context, request.task, request.context)
+        if pack:
+            yield {
+                "type": "context_ready",
+                "summary": pack.summary,
+                "files": context["context_files_with_reasons"],
+            }
 
         repo_path = (
             getattr(request.context, "workspace_path", None)
@@ -738,11 +865,27 @@ class InteractiveOrchestrator:
             role="assistant",
             content=f"[PhasedRun] {request.task} — {len(phases)} phase(s) complete",
         ))
+        report = getattr(runner, "last_verification", None)
         yield {
             "type": "phased_done",
             "total_phases": len(phases),
             "files_written": files_written,
+            "verification": (
+                self._verification_summary(report).model_dump() if report else None
+            ),
         }
+
+    @staticmethod
+    def _verification_summary(report) -> VerificationSummary:
+        """Convert a verifier VerificationReport into the response model."""
+        return VerificationSummary(
+            final_status=report.final_status,
+            checks_run=report.checks_run,
+            passed=report.passed,
+            repair_attempted=report.repair_attempted,
+            repair_attempts=report.repair_attempts,
+            last_failure_summary=report.last_failure_summary,
+        )
 
     def _agent_result_to_steps(self, result, total_ms: int) -> list[AutoRunStep]:
         """Convert AgentLoop tool call log into AutoRunStep cards."""
@@ -798,12 +941,42 @@ class InteractiveOrchestrator:
         return steps
 
     def _commit_agent_changes(
-        self, session_id: str, task: str, result, repo_path: str
+        self, session_id: str, task: str, change_set, repo_path: str
     ) -> Optional[ExecutionResultCard]:
-        """git add + commit all files the agent wrote, store result card."""
+        """
+        Gate the agent's ChangeSet through the core validation/governance
+        pipeline, then commit ONLY the staged files. Never uses `git add -A`.
+        Returns a Broken card (no commit) when the gate blocks the change.
+        """
+        from app.interactive.change_set import evaluate_change_set
+
+        if change_set is None or change_set.is_empty():
+            return None
+
+        gate = evaluate_change_set(change_set, description=task, mode="CRITICAL")
+        if not gate.passed:
+            reverted = False
+            try:
+                change_set.revert(repo_path)
+                reverted = True
+                logger.info(f"Reverted blocked ChangeSet paths: {change_set.paths}")
+            except Exception as exc:
+                logger.error(f"Failed to revert blocked ChangeSet: {exc}", exc_info=True)
+            card = ExecutionResultCard(
+                status="Broken", mode="CRITICAL",
+                files_changed=change_set.paths,
+                lines_changed=gate.lines_changed,
+                validation_passed=False,
+                error="; ".join(gate.errors),
+                reverted=reverted,
+            )
+            self.session_manager.set_last_execution(session_id, card)
+            logger.warning(f"ChangeSet blocked for session {session_id}: {gate.errors}")
+            return card
+
         try:
-            subprocess.run(["git", "add", "-A"], cwd=repo_path, check=True,
-                           capture_output=True, timeout=15)
+            subprocess.run(["git", "add", "--", *change_set.paths],
+                           cwd=repo_path, check=True, capture_output=True, timeout=15)
             msg = f"agent: {task[:72]}"
             proc = subprocess.run(
                 ["git", "commit", "-m", msg],
@@ -818,7 +991,9 @@ class InteractiveOrchestrator:
                 card = ExecutionResultCard(
                     status="Working", mode="CRITICAL",
                     commit_sha=sha,
-                    files_changed=result.files_written,
+                    files_changed=change_set.paths,
+                    lines_changed=gate.lines_changed,
+                    validation_passed=True,
                 )
                 self.session_manager.set_last_execution(session_id, card)
                 logger.info(f"AgentLoop commit {sha} for session {session_id}")

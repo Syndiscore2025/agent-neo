@@ -131,9 +131,95 @@ import * as utils from '../utils';
         }
         
         prompt = engine.build_prompt_context(context)
-        
+
         assert "100 files" in prompt
         assert "5000 lines" in prompt
         assert "test.py" in prompt
         assert "print('hello')" in prompt
+
+
+class TestBuildContextPack:
+    """Tests for the task-aware context pack (Phase B)."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_index(self, monkeypatch):
+        from app.modules.repo_index import reset_repo_index_cache
+        monkeypatch.setenv("NEO_DISABLE_EMBEDDINGS", "1")
+        reset_repo_index_cache()
+        yield
+        reset_repo_index_cache()
+
+    def _make_repo(self, tmp_path):
+        (tmp_path / "payments.py").write_text(
+            "def payment_schedule():\n    '''payments schedule'''\n    return []\n"
+        )
+        (tmp_path / "module.py").write_text("from payments import payment_schedule\n")
+        (tmp_path / "test_module.py").write_text("def test_module(): pass\n")
+        (tmp_path / "other.py").write_text("x = 1\n")
+        return tmp_path
+
+    def test_pack_is_bounded_and_every_file_has_a_reason(self, tmp_path):
+        repo = self._make_repo(tmp_path)
+        for i in range(30):
+            (repo / f"payments_extra_{i}.py").write_text("# payments helper\n")
+
+        engine = ContextEngine(str(repo))
+        pack = engine.build_context_pack("improve the payments code")
+
+        all_files = pack.primary_files + pack.supporting_files
+        assert 0 < len(all_files) <= engine.max_pack_files
+        assert len(pack.primary_files) <= engine.max_primary_files
+        assert all(f.reason for f in all_files)
+        assert pack.summary
+
+    def test_active_file_heuristics_with_reasons(self, tmp_path):
+        repo = self._make_repo(tmp_path)
+        engine = ContextEngine(str(repo))
+        chat_context = ChatContext(
+            current_file="module.py",
+            current_file_content="from payments import payment_schedule\n",
+        )
+
+        pack = engine.build_context_pack("refactor module", chat_context)
+        all_files = pack.primary_files + pack.supporting_files
+        by_path = {f.path: f for f in all_files}
+
+        assert pack.primary_files[0].path == "module.py"
+        assert pack.primary_files[0].reason == "active file in editor"
+        assert "payments.py" in by_path
+        assert by_path["payments.py"].source in ("import", "semantic", "keyword")
+        assert "test_module.py" in by_path
+        assert "test file" in by_path["test_module.py"].reason
+
+    def test_task_keywords_surface_expected_files(self, tmp_path):
+        repo = self._make_repo(tmp_path)
+        engine = ContextEngine(str(repo))
+
+        pack = engine.build_context_pack("fix the payments schedule bug")
+        all_paths = [f.path for f in pack.primary_files + pack.supporting_files]
+
+        assert "payments.py" in all_paths
+
+    def test_fallback_when_repo_index_unavailable(self, tmp_path, monkeypatch):
+        import app.modules.repo_index as repo_index_mod
+
+        def boom(_path):
+            raise RuntimeError("index unavailable")
+
+        monkeypatch.setattr(repo_index_mod, "get_repo_index", boom)
+
+        repo = self._make_repo(tmp_path)
+        engine = ContextEngine(str(repo))
+        chat_context = ChatContext(
+            current_file="module.py",
+            current_file_content="from payments import payment_schedule\n",
+        )
+
+        pack = engine.build_context_pack("refactor module", chat_context)
+        all_files = pack.primary_files + pack.supporting_files
+
+        assert all_files  # heuristics-only pack still produced
+        assert all_files[0].path == "module.py"
+        assert all(f.source in ("active_file", "import", "test_file", "sibling")
+                   for f in all_files)
 

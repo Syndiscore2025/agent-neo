@@ -55,8 +55,11 @@ function activate(context) {
     // Initialize status bar
     statusBar = new statusBar_1.StatusBarManager();
     context.subscriptions.push(statusBar);
-    // Initialize chat panel
+    // Initialize chat panel + sidebar view
     chatPanel = new chatPanel_1.ChatPanel(context);
+    context.subscriptions.push(vscode.window.registerWebviewViewProvider(chatPanel_1.ChatPanel.viewId, chatPanel, {
+        webviewOptions: { retainContextWhenHidden: true }
+    }));
     // Initialize completion provider
     const config = vscode.workspace.getConfiguration('agentNeo');
     if (config.get('enableInlineCompletion', true)) {

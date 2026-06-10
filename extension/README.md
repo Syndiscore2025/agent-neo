@@ -2,19 +2,14 @@
 
 Interactive coding partner powered by Agent NEO.
 
-## Features (In Development)
+## Features
 
-This extension is being built in slices. Current status:
-
-- **SLICE 1 (Current)**: Scaffolding complete
-- **SLICE 2**: Chat MVP (TODO)
-- **SLICE 3**: Context-aware repo understanding (TODO)
-- **SLICE 4**: Action planner + diff proposal (TODO)
-- **SLICE 5**: Agent NEO execution integration (TODO)
-- **SLICE 6**: Image + PDF attachments (TODO)
-- **SLICE 7**: Inline autocomplete (TODO)
-- **SLICE 8**: Predictive prompt suggestions (TODO)
-- **SLICE 9**: Hardening + UX polish (TODO)
+- **Sidebar chat** — Agent NEO lives in its own activity-bar view (left sidebar). `Agent NEO: Open Chat` focuses it; an editor panel is used as a fallback.
+- **Live run cards** — AutoRun and phased runs stream progress into the chat: context packs, plan/phase progress, tool activity, verification + repair attempts, governance gate outcomes, commits, and a final run summary card with clickable file chips.
+- **Workspace awareness** — a header strip shows the current folder, git branch, and pending change count (via VS Code's built-in git extension).
+- **Terminal integration** — `run_command` results include a "Run in terminal" button that replays the command in a dedicated "Agent NEO" terminal (`Agent NEO: Open Agent NEO Terminal`).
+- **In-chat settings** — the ⚙️ button opens a settings surface: integrations/health, rules & guidelines (`.neo`, `.neo.md`, `AGENT.md`), last context pack, terminal, workspace, and preferences.
+- **Chat extras** — slash commands (`/run`, `/plan`, `/fix`, `/verify`, `/rollback`, `/clone`), diff proposals with approve/reject, image/PDF attachments, speech-to-text, prompt suggestions, inline completion.
 
 ## Requirements
 

@@ -118,5 +118,9 @@ function registerCommands(context, chatPanel, statusBar) {
         chatPanel.show();
         await chatPanel.sendMessage('Tell me about the file: ' + fileName);
     }));
+    // Open dedicated Agent NEO terminal
+    context.subscriptions.push(vscode.commands.registerCommand('agent-neo.openTerminal', () => {
+        chatPanel.openTerminal();
+    }));
 }
 //# sourceMappingURL=commands.js.map

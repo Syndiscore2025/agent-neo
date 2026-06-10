@@ -34,6 +34,8 @@ Rules:
 - "reviewer" phases check for bugs/security — optional, add for complex tasks.
 - "dependencies": list of phase IDs that must complete before this one starts.
 - "checkpoint_cmd": optional shell command to verify the phase (e.g. "python -m pytest").
+  Every phase that edits files is automatically verified by the system after it
+  completes; set checkpoint_cmd only when a specific command should be used.
 - Keep phases focused. Each phase does ONE clear thing.
 - For small tasks (fix a typo, rename a variable), use 1-2 phases max.
 
@@ -69,6 +71,11 @@ async def plan_task(model_router, task: str, context: dict) -> list[Phase]:
             f"Repo: {s.get('total_files', '?')} files, "
             f"langs: {', '.join(s.get('languages', []))}"
         )
+    pack_files = context.get("context_files_with_reasons") or []
+    if pack_files:
+        context_lines.append("Relevant files (selected by the context engine):")
+        for f in pack_files[:10]:
+            context_lines.append(f"  - {f.get('path', '?')} — {f.get('reason', '')}")
     context_str = "\n".join(context_lines) if context_lines else "No additional context."
 
     prompt = _PLANNER_PROMPT.format(context=context_str, task=task)

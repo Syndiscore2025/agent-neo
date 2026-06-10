@@ -23,8 +23,13 @@ export function activate(context: vscode.ExtensionContext) {
     statusBar = new StatusBarManager();
     context.subscriptions.push(statusBar);
 
-    // Initialize chat panel
+    // Initialize chat panel + sidebar view
     chatPanel = new ChatPanel(context);
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(ChatPanel.viewId, chatPanel, {
+            webviewOptions: { retainContextWhenHidden: true }
+        })
+    );
 
     // Initialize completion provider
     const config = vscode.workspace.getConfiguration('agentNeo');

@@ -25,6 +25,7 @@ class ExecutionResultCard(BaseModel):
     post_test_passed: Optional[bool] = None
     validation_passed: Optional[bool] = None
     error: Optional[str] = None
+    reverted: bool = False
 
 
 class ActionType(str):
@@ -194,6 +195,39 @@ class RollbackResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Task-aware context selection (Phase B)
+# ---------------------------------------------------------------------------
+class FileContext(BaseModel):
+    """A file selected for a task, with the reason it was chosen."""
+    path: str
+    reason: str               # human-readable, e.g. "semantic match for 'payments'"
+    score: Optional[float] = None
+    source: str = "search"    # "active_file" | "import" | "test_file" | "sibling"
+                              # | "semantic" | "keyword" | "convention"
+
+
+class ContextPack(BaseModel):
+    """Ranked, explainable set of files relevant to a task."""
+    task: str
+    primary_files: List[FileContext] = Field(default_factory=list)
+    supporting_files: List[FileContext] = Field(default_factory=list)
+    summary: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Verification + bounded repair (Phase C)
+# ---------------------------------------------------------------------------
+class VerificationSummary(BaseModel):
+    """Final outcome of the system-controlled verification/repair loop."""
+    final_status: str = "skipped"    # "passed" | "failed" | "skipped"
+    checks_run: List[str] = Field(default_factory=list)
+    passed: bool = True
+    repair_attempted: bool = False
+    repair_attempts: int = 0
+    last_failure_summary: str = ""
+
+
+# ---------------------------------------------------------------------------
 # Autonomous task runner
 # ---------------------------------------------------------------------------
 class AutoRunStep(BaseModel):
@@ -220,6 +254,9 @@ class AutoRunResponse(BaseModel):
     overall_status: str      # "success" | "failed" | "partial"
     summary: str
     execution_result: Optional[ExecutionResultCard] = None
+    context_summary: Optional[str] = None
+    context_files: List[FileContext] = Field(default_factory=list)
+    verification: Optional[VerificationSummary] = None
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 

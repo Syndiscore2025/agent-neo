@@ -11,6 +11,8 @@ from typing import AsyncGenerator, Optional
 from app.interactive.planner import Phase
 from app.interactive.specialists import get_specialist
 from app.interactive.agent_loop import AgentLoop
+from app.interactive.change_set import evaluate_change_set
+from app.interactive.verifier import Verifier, VerificationReport
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +21,7 @@ class PhaseRunner:
     def __init__(self, model_router, repo_path: str):
         self.model_router = model_router
         self.repo_path = repo_path
+        self.last_verification: Optional[VerificationReport] = None
 
     async def run_phases(
         self, phases: list[Phase], task: str, context: dict
@@ -31,9 +34,14 @@ class PhaseRunner:
           phase_start       — beginning of a phase
           text / tool_start / tool_end — forwarded from AgentLoop.run_stream()
           finish            — forwarded finish event from the specialist
+          verification_started / verification_passed / verification_failed
+          repair_started / repair_succeeded / repair_exhausted
+          verification_summary — final verification outcome for the phase
+          change_set_blocked — phase change set rejected by validation/governance
           phase_checkpoint  — git commit SHA after each phase
-          phase_verify      — output of the phase's checkpoint_cmd (if set)
           phase_end         — summary after a phase completes
+          run_halted        — run stopped (phase error, blocked change set,
+                              or failed verification)
           error             — if something fatal happens
         """
         yield {
@@ -95,31 +103,99 @@ class PhaseRunner:
                     "phase_id": phase.id,
                     "error": str(exc),
                 }
-                # Don't abort — carry on with remaining phases
-                phase_summary = f"Phase failed: {exc}"
+                yield {
+                    "type": "run_halted",
+                    "phase_id": phase.id,
+                    "phase_name": phase.name,
+                    "reason": f"Phase '{phase.name}' raised: {exc}",
+                }
+                return
 
             completed[phase.id] = phase_summary
 
-            # ── git checkpoint ────────────────────────────────────────────────
-            sha = self._git_checkpoint(phase.name)
-            if sha:
-                yield {
-                    "type": "phase_checkpoint",
-                    "phase_id": phase.id,
-                    "phase_name": phase.name,
-                    "commit_sha": sha,
-                }
+            # ── system-controlled verification + bounded repair ──────────────
+            # Editing phases are always verified (regardless of whether the
+            # planner supplied a checkpoint_cmd); read-only phases with no
+            # edits are verified only if a checkpoint_cmd was given.
+            change_set = agent.last_change_set
+            if (change_set and not change_set.is_empty()) or phase.checkpoint_cmd:
+                verifier = Verifier(
+                    self.repo_path, checkpoint_cmd=phase.checkpoint_cmd
+                )
+                async for v_event in verifier.verify_and_repair(
+                    task=phase_task,
+                    change_set=change_set,
+                    context=context,
+                    model_router=self.model_router,
+                ):
+                    yield {**v_event, "phase_id": phase.id, "phase_name": phase.name}
 
-            # ── optional verification command ─────────────────────────────────
-            if phase.checkpoint_cmd:
-                verify = self._run_checkpoint(phase.checkpoint_cmd)
-                yield {
-                    "type": "phase_verify",
-                    "phase_id": phase.id,
-                    "command": phase.checkpoint_cmd,
-                    "exit_code": verify["exit_code"],
-                    "output": verify["output"],
-                }
+                report = verifier.last_report
+                self.last_verification = report
+                if report and not report.passed:
+                    reverted = False
+                    if change_set and not change_set.is_empty():
+                        try:
+                            change_set.revert(self.repo_path)
+                            reverted = True
+                        except Exception as exc:
+                            logger.error(
+                                f"Failed to revert ChangeSet after failed "
+                                f"verification for phase {phase.id}: {exc}",
+                                exc_info=True,
+                            )
+                    yield {
+                        "type": "run_halted",
+                        "phase_id": phase.id,
+                        "phase_name": phase.name,
+                        "reason": (
+                            f"Verification failed after "
+                            f"{report.repair_attempts} repair attempt(s)"
+                        ),
+                        "reverted": reverted,
+                    }
+                    return
+
+            # ── gated git checkpoint (only this phase's change set) ──────────
+            if change_set and not change_set.is_empty():
+                gate = evaluate_change_set(
+                    change_set, description=phase_task, mode="CRITICAL"
+                )
+                if not gate.passed:
+                    reverted = False
+                    try:
+                        change_set.revert(self.repo_path)
+                        reverted = True
+                    except Exception as exc:
+                        logger.error(
+                            f"Failed to revert blocked ChangeSet for phase {phase.id}: {exc}",
+                            exc_info=True,
+                        )
+                    yield {
+                        "type": "change_set_blocked",
+                        "phase_id": phase.id,
+                        "phase_name": phase.name,
+                        "files": change_set.paths,
+                        "errors": gate.errors,
+                        "reverted": reverted,
+                    }
+                    yield {
+                        "type": "run_halted",
+                        "phase_id": phase.id,
+                        "phase_name": phase.name,
+                        "reason": "Change set blocked by validation/governance",
+                    }
+                    return
+
+                sha = self._git_checkpoint(phase.name, change_set.paths)
+                if sha:
+                    yield {
+                        "type": "phase_checkpoint",
+                        "phase_id": phase.id,
+                        "phase_name": phase.name,
+                        "commit_sha": sha,
+                        "files": change_set.paths,
+                    }
 
             yield {
                 "type": "phase_end",
@@ -154,11 +230,14 @@ class PhaseRunner:
         ordered.extend(p for p in phases if p.id not in seen)
         return ordered
 
-    def _git_checkpoint(self, phase_name: str) -> Optional[str]:
-        """git add -A + commit. Returns short SHA or None if nothing to commit."""
+    def _git_checkpoint(self, phase_name: str, paths: list[str]) -> Optional[str]:
+        """Stage only the phase's change-set paths + commit.
+        Returns short SHA or None if nothing to commit."""
+        if not paths:
+            return None
         try:
             subprocess.run(
-                ["git", "add", "-A"],
+                ["git", "add", "--", *paths],
                 cwd=self.repo_path, check=True, capture_output=True, timeout=15,
             )
             proc = subprocess.run(
@@ -175,18 +254,4 @@ class PhaseRunner:
         except Exception as exc:
             logger.warning(f"Phase checkpoint skipped ({phase_name}): {exc}")
         return None
-
-    def _run_checkpoint(self, cmd: str) -> dict:
-        """Run the phase verification command and return exit_code + output."""
-        try:
-            result = subprocess.run(
-                cmd, shell=True, cwd=self.repo_path,
-                capture_output=True, text=True, timeout=60,
-            )
-            return {
-                "exit_code": result.returncode,
-                "output": (result.stdout + result.stderr).strip()[:500],
-            }
-        except Exception as exc:
-            return {"exit_code": -1, "output": str(exc)}
 

@@ -41,8 +41,30 @@
       {
         "command": "agent-neo.askAboutFile",
         "title": "Agent NEO: Ask About Current File"
+      },
+      {
+        "command": "agent-neo.openTerminal",
+        "title": "Agent NEO: Open Agent NEO Terminal"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agent-neo",
+          "title": "Agent NEO",
+          "icon": "media/neo.svg"
+        }
+      ]
+    },
+    "views": {
+      "agent-neo": [
+        {
+          "type": "webview",
+          "id": "agent-neo.chatView",
+          "name": "Agent NEO"
+        }
+      ]
+    },
     "menus": {
       "editor/context": [
         {

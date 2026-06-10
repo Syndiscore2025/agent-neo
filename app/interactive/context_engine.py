@@ -14,7 +14,7 @@ from app.modules.repo_context import (
     find_files_by_pattern,
     get_directory_structure
 )
-from app.interactive.contracts import ChatContext
+from app.interactive.contracts import ChatContext, ContextPack, FileContext
 
 logger = logging.getLogger(__name__)
 
@@ -22,11 +22,11 @@ logger = logging.getLogger(__name__)
 class ContextEngine:
     """
     Gathers and enriches context for chat interactions.
-    
+
     For MVP: Simple file-based context gathering.
     No vector DB or embeddings yet.
     """
-    
+
     def __init__(self, repo_path: str):
         """
         Initialize context engine.
@@ -42,21 +42,16 @@ class ContextEngine:
         self.max_file_size = 100000  # 100KB
         self.max_context_lines = 500
         self.max_related_files = 5
-        self._repo_cache: Optional[Dict] = None
-        self._file_cache: Dict[str, str] = {}
+        self.max_pack_files = 15
+        self.max_primary_files = 5
 
-        # Configuration
-        self.max_file_size = 100000  # 100KB
-        self.max_context_lines = 500
-        self.max_related_files = 5
-    
     def gather_context(self, chat_context: Optional[ChatContext] = None) -> Dict:
         """
         Gather context for a chat interaction.
-        
+
         Args:
             chat_context: Context from VS Code extension
-            
+
         Returns:
             Enriched context dictionary
         """
@@ -68,14 +63,14 @@ class ContextEngine:
             "related_files": [],
             "repo_summary": None
         }
-        
+
         # Add VS Code context if provided
         if chat_context:
             context["current_file"] = chat_context.current_file
             context["current_file_content"] = chat_context.current_file_content
             context["selected_code"] = chat_context.selected_code
             context["language"] = chat_context.language
-        
+
         # Get repository summary (cached)
         if self._repo_cache is None:
             try:
@@ -100,7 +95,94 @@ class ContextEngine:
             )
 
         return context
-    
+
+    def build_context_pack(
+        self,
+        task_description: str,
+        chat_context: Optional[ChatContext] = None,
+    ) -> ContextPack:
+        """
+        Build a ranked, explainable set of files relevant to a task.
+
+        Combines the shared RepoIndex (semantic/keyword search) with active-file
+        heuristics (imports, test file, siblings). Every file carries a reason.
+        Degrades to heuristics-only if the RepoIndex is unavailable.
+        """
+        candidates: List[FileContext] = []
+        seen: Set[str] = set()
+
+        def add(path: str, reason: str, source: str, score: Optional[float] = None):
+            norm = Path(path).as_posix()
+            if norm in seen or len(candidates) >= self.max_pack_files:
+                return
+            seen.add(norm)
+            candidates.append(FileContext(path=norm, reason=reason, source=source, score=score))
+
+        current_file = chat_context.current_file if chat_context else None
+        current_content = chat_context.current_file_content if chat_context else None
+
+        # 1. Active file always leads
+        if current_file:
+            add(current_file, "active file in editor", "active_file")
+
+            # 2. Imports of the active file
+            if current_content:
+                suffix = Path(current_file).suffix
+                for imp in self._extract_imports(current_content, suffix)[:self.max_related_files]:
+                    if (self.repo_path / imp).exists():
+                        add(imp, f"imported by the active file ({Path(current_file).name})", "import")
+
+            # 3. Likely test file
+            test_file = self._find_test_file(current_file)
+            if test_file:
+                add(test_file, f"likely test file for {Path(current_file).name}", "test_file")
+
+        # 4. Task-driven search via the shared RepoIndex
+        index_summary = None
+        try:
+            from app.modules.repo_index import get_repo_index
+            index = get_repo_index(str(self.repo_path))
+            for result in index.search(task_description, k=12):
+                meta = index.get_file_metadata(result["path"]) or {}
+                if meta.get("is_convention"):
+                    reason = f"convention file: {Path(result['path']).name} ({result['reason']})"
+                    source = "convention"
+                else:
+                    reason = result["reason"]
+                    source = "semantic" if result["reason"].startswith("semantic") else "keyword"
+                add(result["path"], reason, source, score=result.get("score"))
+            index_summary = index.summarize()
+        except Exception as exc:
+            logger.warning(f"RepoIndex unavailable for context pack: {exc}")
+
+        # 5. Same-directory siblings of the active file (lowest priority)
+        if current_file:
+            for sibling in self._find_files_in_same_directory(current_file):
+                add(sibling, "same directory as active file", "sibling")
+
+        primary = candidates[:self.max_primary_files]
+        supporting = candidates[self.max_primary_files:]
+
+        source_counts: Dict[str, int] = {}
+        for fc in candidates:
+            source_counts[fc.source] = source_counts.get(fc.source, 0) + 1
+        breakdown = ", ".join(f"{n} {src}" for src, n in source_counts.items())
+        summary = (
+            f"Selected {len(candidates)} file(s) for task "
+            f"'{task_description.strip()[:60]}'"
+            + (f" ({breakdown})" if breakdown else "")
+        )
+        if index_summary and not index_summary.get("embeddings_available"):
+            summary += " — keyword search (embeddings unavailable)"
+
+        return ContextPack(
+            task=task_description,
+            primary_files=primary,
+            supporting_files=supporting,
+            summary=summary,
+        )
+
+
     def _find_related_files_smart(
         self,
         current_file: str,
@@ -171,31 +253,31 @@ class ContextEngine:
             smart_results = self._find_related_files_smart(current_file)
             return [r["path"] for r in smart_results]
         return []
-    
+
     def get_file_context(self, file_path: str, line_range: Optional[tuple] = None) -> Optional[str]:
         """
         Get content of a specific file.
-        
+
         Args:
             file_path: Relative path to file
             line_range: Optional (start_line, end_line) tuple
-            
+
         Returns:
             File content or None
         """
         try:
             content = get_file_content(str(self.repo_path), file_path)
-            
+
             if content and line_range:
                 lines = content.splitlines()
                 start, end = line_range
                 content = '\n'.join(lines[start-1:end])
-            
+
             return content
         except Exception as e:
             logger.error(f"Failed to get file context: {e}")
             return None
-    
+
     def _extract_imports(self, content: str, file_ext: str) -> List[str]:
         """
         Extract import statements from file content.

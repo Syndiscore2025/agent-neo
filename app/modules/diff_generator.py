@@ -37,8 +37,46 @@ def generate_unified_diff(
         lineterm='',
         n=context_lines
     )
-    
-    return ''.join(diff)
+
+    # Normalize: every diff line must end with a newline so headers
+    # (---, +++, @@) are not glued to the following line.
+    return ''.join(
+        line if line.endswith('\n') else line + '\n'
+        for line in diff
+    )
+
+
+def generate_file_deletion_diff(
+    file_path: str,
+    original_content: str,
+    context_lines: int = 3
+) -> str:
+    """
+    Generate a git-style unified diff for a whole-file deletion.
+
+    Args:
+        file_path: Path to the deleted file (for headers)
+        original_content: Content of the file before deletion
+        context_lines: Number of context lines
+
+    Returns:
+        Unified diff string with a /dev/null target
+    """
+    original_lines = original_content.splitlines(keepends=True)
+
+    diff = difflib.unified_diff(
+        original_lines,
+        [],
+        fromfile=f'a/{file_path}',
+        tofile='/dev/null',
+        lineterm='',
+        n=context_lines
+    )
+
+    return ''.join(
+        line if line.endswith('\n') else line + '\n'
+        for line in diff
+    )
 
 
 def generate_multi_file_diff(
@@ -56,13 +94,14 @@ def generate_multi_file_diff(
         Combined unified diff string
     """
     diffs = []
-    
+
     for file_path, original, modified in changes:
         diff = generate_unified_diff(file_path, original, modified, context_lines)
         if diff:
             diffs.append(diff)
-    
-    return '\n'.join(diffs)
+
+    # Each per-file diff already ends with a newline.
+    return ''.join(diffs)
 
 
 def apply_line_changes(

@@ -183,6 +183,59 @@ def test_validate_diff_forbidden_pattern_alter_table_rapid():
     assert not any("alter table" in err.lower() for err in result_critical.errors)
 
 
+def test_parse_diff_metadata_detects_whole_file_deletion():
+    """A /dev/null diff is recognized as a whole-file deletion."""
+    deletion_diff = """--- a/old.py
++++ /dev/null
+@@ -1,3 +0,0 @@
+-line1
+-line2
+-line3
+"""
+    metadata = parse_diff_metadata(deletion_diff)
+    assert metadata.is_valid_unified_diff
+    assert metadata.file_paths == ["old.py"]
+    assert metadata.deleted_files == ["old.py"]
+    assert metadata.lines_removed == 3
+
+
+def test_validate_diff_allows_whole_file_deletion():
+    """Explicit whole-file deletions skip the deletion-percent check."""
+    deletion_diff = """--- a/old.py
++++ /dev/null
+@@ -1,3 +0,0 @@
+-line1
+-line2
+-line3
+"""
+    result = validate_diff(deletion_diff, "CRITICAL")
+    assert result.valid
+
+
+def test_validate_diff_deletion_message_is_human_readable():
+    """The deletion-percent error names the rule, file, percent and threshold."""
+    high_deletion_diff = """--- a/test.py
++++ b/test.py
+@@ -1,10 +1,1 @@
+-line1
+-line2
+-line3
+-line4
+-line5
+-line6
+-line7
+-line8
+-line9
++new1
+"""
+    result = validate_diff(high_deletion_diff, "CRITICAL")
+    assert result.valid == False
+    assert any(
+        "MAX_FILE_DELETION_PERCENT" in err and "test.py" in err and "40% threshold" in err
+        for err in result.errors
+    )
+
+
 def test_calculate_deletion_percent_no_changes():
     """Test deletion percentage with no changes."""
     diff = """--- a/test.py

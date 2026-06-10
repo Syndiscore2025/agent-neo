@@ -108,6 +108,7 @@ class DiffMetadata(BaseModel):
     total_lines_changed: int
     file_paths: List[str]
     is_valid_unified_diff: bool
+    deleted_files: List[str] = Field(default_factory=list)
 
     @property
     def total_changes(self) -> int:

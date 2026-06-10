@@ -19,11 +19,17 @@ def test_generate_unified_diff_simple():
     modified = "line 1\nline 2 modified\nline 3\n"
     
     diff = generate_unified_diff("test.txt", original, modified)
-    
+
     assert "--- a/test.txt" in diff
     assert "+++ b/test.txt" in diff
     assert "-line 2" in diff
     assert "+line 2 modified" in diff
+
+    # Headers must be on their own lines (regression: glued headers)
+    lines = diff.splitlines()
+    assert lines[0] == "--- a/test.txt"
+    assert lines[1] == "+++ b/test.txt"
+    assert lines[2].startswith("@@")
 
 
 def test_generate_unified_diff_addition():

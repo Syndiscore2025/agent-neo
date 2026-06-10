@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
+from app.interactive.change_set import ChangeSet
 from app.interactive.tools import ToolExecutor, TOOL_SCHEMAS, get_filtered_schemas
 
 logger = logging.getLogger(__name__)
@@ -33,22 +34,26 @@ class AgentResult:
     tool_calls: list[ToolCall] = field(default_factory=list)
     files_written: list[str] = field(default_factory=list)
     error: Optional[str] = None
+    change_set: Optional[ChangeSet] = None
 
 
 # ── Base system prompt ────────────────────────────────────────────────────────
-_BASE_SYSTEM = """You are Agent NEO, an autonomous coding assistant.
-You have access to real tools: read_file, write_file, list_dir, run_command, search_code, web_search, semantic_search, finish.
+_BASE_SYSTEM = """You are Agent NEO — an autonomous AI coding agent embedded in the developer's IDE.
 
-Guidelines:
-1. ALWAYS read a file before modifying it so you write the full correct content.
-2. Use semantic_search or search_code to discover relevant code before writing.
-3. Use list_dir to explore unfamiliar directories.
-4. After writing files, run tests or a linter with run_command to verify.
-5. If tests fail, read the error output carefully, fix the code, and run tests again.
-6. When done (or no further progress is possible), call finish with a clear summary.
-7. Never call git push. Never delete files unless explicitly instructed.
-8. Write complete file contents — never use placeholders like '# ... rest unchanged'.
-9. You may call multiple independent tools in a single response — they will execute in parallel.
+You have real tools: read_file, write_file, list_dir, run_command, search_code, web_search, semantic_search, finish.
+
+EXECUTION RULES (non-negotiable):
+1. START WORKING IMMEDIATELY. Never say "Let me know how to proceed" or ask permission.
+2. ALWAYS read a file before modifying it — write the complete, correct content.
+3. Use search_code or semantic_search to find relevant code before writing anything.
+4. Use list_dir to explore unknown directories.
+5. After writing files, verify with run_command (tests, linter, build).
+6. Fix failures: read error output → fix code → re-run → repeat until clean.
+7. Call finish() only when all work is done or truly blocked, with a factual summary.
+8. Never run git push. Never delete files unless explicitly told to.
+9. Write COMPLETE file contents — zero placeholders like '# ... rest unchanged'.
+10. Call multiple independent tools in one response — they run in parallel.
+11. Never narrate what you are about to do. Just do it.
 """
 
 
@@ -66,6 +71,7 @@ class AgentLoop:
     def __init__(self, model_router, repo_path: str):
         self.model_router = model_router
         self.repo_path = repo_path
+        self.last_change_set: Optional[ChangeSet] = None
 
     def _build_system(self) -> str:
         """Build system prompt: base rules + project guidelines."""
@@ -84,6 +90,7 @@ class AgentLoop:
         max_iterations_override: Optional[int] = None,
     ) -> AgentResult:
         executor = ToolExecutor(self.repo_path)
+        self.last_change_set = executor.change_set
         tool_calls_log: list[ToolCall] = []
         system = system_override or self._build_system()
         tools = get_filtered_schemas(tool_subset) if tool_subset else TOOL_SCHEMAS
@@ -110,6 +117,7 @@ class AgentLoop:
                     tool_calls=tool_calls_log,
                     files_written=executor.files_written,
                     error=str(exc),
+                    change_set=executor.change_set,
                 )
 
             tool_calls: list[dict] = llm_resp.get("tool_calls", [])
@@ -120,6 +128,7 @@ class AgentLoop:
                     summary=llm_resp.get("text", "Task complete."),
                     tool_calls=tool_calls_log,
                     files_written=executor.files_written,
+                    change_set=executor.change_set,
                 )
 
             messages.append({"role": "assistant", "content": llm_resp["raw_content"]})
@@ -172,6 +181,7 @@ class AgentLoop:
                     summary=inp.get("summary", result_text),
                     tool_calls=tool_calls_log,
                     files_written=executor.files_written,
+                    change_set=executor.change_set,
                 )
 
             messages.append({"role": "user", "content": tool_results})
@@ -185,6 +195,7 @@ class AgentLoop:
             tool_calls=tool_calls_log,
             files_written=executor.files_written,
             error="max_iterations_exceeded",
+            change_set=executor.change_set,
         )
 
     async def run_stream(
@@ -200,6 +211,7 @@ class AgentLoop:
         Compatible with StreamEvent schema in contracts.py.
         """
         executor = ToolExecutor(self.repo_path)
+        self.last_change_set = executor.change_set
         tool_calls_log: list[ToolCall] = []
         system = system_override or self._build_system()
         tools = get_filtered_schemas(tool_subset) if tool_subset else TOOL_SCHEMAS
@@ -367,6 +379,16 @@ class AgentLoop:
             parts.append(
                 f"Repo: {s.get('total_files', '?')} files | "
                 f"langs: {', '.join(s.get('languages', []))}"
+            )
+        # Task-aware context pack: files selected by the context engine, with reasons
+        pack_files = context.get("context_files_with_reasons") or []
+        if pack_files:
+            file_lines = "\n".join(
+                f"  • {f.get('path', '?')} — {f.get('reason', '')}"
+                for f in pack_files[:15]
+            )
+            parts.append(
+                f"RELEVANT FILES (selected by the context engine, with reasons):\n{file_lines}"
             )
         # Inject VS Code diagnostics (errors / warnings from IDE)
         diagnostics = context.get("diagnostics") or []

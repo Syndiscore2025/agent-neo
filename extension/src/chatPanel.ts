@@ -4,22 +4,70 @@
  */
 
 import * as vscode from 'vscode';
+import * as path from 'path';
+import * as fs from 'fs';
 import { ApiClient } from './apiClient';
 
-export class ChatPanel {
+export class ChatPanel implements vscode.WebviewViewProvider {
+    public static readonly viewId = 'agent-neo.chatView';
+
     private panel: vscode.WebviewPanel | undefined;
+    private view: vscode.WebviewView | undefined;
+    private terminal: vscode.Terminal | undefined;
+    private gitRepo: any;
+    private workspaceInfoTimer: ReturnType<typeof setTimeout> | undefined;
     private apiClient: ApiClient;
     private sessionId: string | undefined;
     private selectedModel: string = 'claude-sonnet'; // Default model
 
     constructor(private context: vscode.ExtensionContext) {
         this.apiClient = new ApiClient();
+        vscode.window.onDidCloseTerminal(t => {
+            if (t === this.terminal) { this.terminal = undefined; }
+        }, undefined, context.subscriptions);
     }
 
     /**
-     * Show the chat panel.
+     * Post a message to whichever chat surface is live (sidebar preferred).
+     */
+    private post(message: any) {
+        (this.view ?? this.panel)?.webview.postMessage(message);
+    }
+
+    /**
+     * Sidebar entry point — called by VS Code when the Agent NEO view
+     * in the activity bar is first revealed.
+     */
+    public resolveWebviewView(webviewView: vscode.WebviewView) {
+        this.view = webviewView;
+        webviewView.webview.options = { enableScripts: true };
+        webviewView.webview.html = this.getWebviewContent();
+        webviewView.webview.onDidReceiveMessage(
+            message => this.handleMessage(message),
+            undefined,
+            this.context.subscriptions
+        );
+        webviewView.onDidDispose(() => {
+            if (this.view === webviewView) { this.view = undefined; }
+        });
+        void this.initWorkspaceInfo();
+    }
+
+    /**
+     * Show the chat — focuses the sidebar view; falls back to an editor
+     * panel if the view cannot be resolved (e.g. older VS Code).
      */
     public show() {
+        vscode.commands.executeCommand(`${ChatPanel.viewId}.focus`).then(
+            undefined,
+            () => this.showPanel()
+        );
+    }
+
+    /**
+     * Legacy editor-panel surface (fallback when the sidebar is unavailable).
+     */
+    private showPanel() {
         if (this.panel) {
             this.panel.reveal();
             return;
@@ -38,7 +86,6 @@ export class ChatPanel {
         this.panel.webview.html = this.getWebviewContent();
         this.panel.onDidDispose(() => {
             this.panel = undefined;
-            this.sessionId = undefined;
         });
 
         this.panel.webview.onDidReceiveMessage(
@@ -46,18 +93,40 @@ export class ChatPanel {
             undefined,
             this.context.subscriptions
         );
+        void this.initWorkspaceInfo();
+    }
+
+    /**
+     * Get or create the dedicated "Agent NEO" integrated terminal.
+     */
+    public openTerminal(): vscode.Terminal {
+        if (!this.terminal || this.terminal.exitStatus !== undefined) {
+            this.terminal = vscode.window.createTerminal({ name: 'Agent NEO' });
+        }
+        this.terminal.show(true);
+        return this.terminal;
+    }
+
+    /**
+     * Run a command in the Agent NEO terminal (user-initiated from a card).
+     */
+    private runInTerminal(command: string) {
+        if (!command) { return; }
+        this.openTerminal().sendText(command, true);
     }
 
     /**
      * Send a message to the chat (called from commands).
      */
     public async sendMessage(message: string, context?: any) {
-        if (!this.panel) {
+        if (!this.view && !this.panel) {
             this.show();
+            // Give the sidebar webview a moment to resolve before posting
+            await new Promise(resolve => setTimeout(resolve, 600));
         }
 
         // Send message to webview to display
-        this.panel?.webview.postMessage({
+        this.post({
             type: 'userMessage',
             message: message
         });
@@ -90,6 +159,22 @@ export class ChatPanel {
                 if (this.sessionId) {
                     await this.loadHistory();
                 }
+                void this.initWorkspaceInfo();
+                break;
+            case 'openFile':
+                await this._revealFile(message.path);
+                break;
+            case 'runInTerminal':
+                this.runInTerminal(message.command);
+                break;
+            case 'openNeoTerminal':
+                this.openTerminal();
+                break;
+            case 'getSettingsInfo':
+                await this.handleGetSettingsInfo();
+                break;
+            case 'openVSCodeSettings':
+                void vscode.commands.executeCommand('workbench.action.openSettings', 'agentNeo');
                 break;
             case 'uploadAttachment':
                 await this.handleUploadAttachment(message.fileName, message.fileType, message.contentBase64);
@@ -118,7 +203,7 @@ export class ChatPanel {
     private async handleSendMessage(message: string, context?: any, attachmentIds?: string[]) {
         try {
             // Show loading state
-            this.panel?.webview.postMessage({
+            this.post({
                 type: 'loading',
                 loading: true
             });
@@ -140,7 +225,7 @@ export class ChatPanel {
             this.sessionId = response.session_id;
 
             // Send response to webview
-            this.panel?.webview.postMessage({
+            this.post({
                 type: 'assistantMessage',
                 message: response.message,
                 actionType: response.action_type,
@@ -149,12 +234,12 @@ export class ChatPanel {
 
         } catch (error: any) {
             console.error('Failed to send message:', error);
-            this.panel?.webview.postMessage({
+            this.post({
                 type: 'error',
                 message: error.message || 'Failed to send message'
             });
         } finally {
-            this.panel?.webview.postMessage({
+            this.post({
                 type: 'loading',
                 loading: false
             });
@@ -215,7 +300,7 @@ export class ChatPanel {
 
         try {
             const history = await this.apiClient.getChatHistory(this.sessionId);
-            this.panel?.webview.postMessage({
+            this.post({
                 type: 'loadHistory',
                 messages: history.messages
             });
@@ -236,7 +321,7 @@ export class ChatPanel {
             }
         }
         this.sessionId = undefined;
-        this.panel?.webview.postMessage({
+        this.post({
             type: 'sessionCleared'
         });
     }
@@ -251,7 +336,7 @@ export class ChatPanel {
             vscode.window.showInformationMessage(label);
 
             // Show loading state
-            this.panel?.webview.postMessage({
+            this.post({
                 type: 'loading',
                 loading: true
             });
@@ -263,7 +348,7 @@ export class ChatPanel {
             vscode.window.showInformationMessage('Changes applied successfully!');
 
             // Add execution result card to chat
-            this.panel?.webview.postMessage({
+            this.post({
                 type: 'executionResult',
                 message: response.message,
                 executionResult: response.execution_result || null
@@ -273,12 +358,12 @@ export class ChatPanel {
             console.error('Failed to apply changes:', error);
             vscode.window.showErrorMessage(`Failed to apply changes: ${error.message}`);
 
-            this.panel?.webview.postMessage({
+            this.post({
                 type: 'error',
                 message: `Failed to apply changes: ${error.message}`
             });
         } finally {
-            this.panel?.webview.postMessage({
+            this.post({
                 type: 'loading',
                 loading: false
             });
@@ -293,13 +378,13 @@ export class ChatPanel {
             // Call Agent NEO /chat/approve endpoint with approved=false
             const response = await this.apiClient.approveDiff(this.sessionId!, false);
 
-            this.panel?.webview.postMessage({
+            this.post({
                 type: 'assistantMessage',
                 message: response.message
             });
         } catch (error: any) {
             console.error('Failed to reject diff:', error);
-            this.panel?.webview.postMessage({
+            this.post({
                 type: 'error',
                 message: `Failed to reject diff: ${error.message}`
             });
@@ -744,6 +829,146 @@ export class ChatPanel {
                         color: var(--vscode-button-secondaryForeground, #ffffff);
                     }
                     .diff-btn.push:hover { opacity: 0.85; }
+
+                    /* ── Phase D: workspace strip, run cards, settings ── */
+                    #settingsBtn {
+                        background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
+                        color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
+                        border: none;
+                        padding: 4px 8px;
+                        cursor: pointer;
+                        font-size: 12px;
+                        border-radius: 3px;
+                    }
+                    #settingsBtn:hover { opacity: 0.85; }
+                    #wsStrip {
+                        display: flex;
+                        align-items: center;
+                        gap: 10px;
+                        padding: 3px 16px;
+                        font-size: 11px;
+                        opacity: 0.8;
+                        border-bottom: 1px solid var(--vscode-panel-border);
+                        background-color: var(--vscode-sideBar-background);
+                    }
+                    #wsStrip:empty { display: none; }
+                    #wsStrip .ws-item { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+                    .neo-card {
+                        border: 1px solid var(--vscode-panel-border, #444);
+                        border-left: 3px solid var(--vscode-textLink-foreground, #4daafc);
+                        border-radius: 4px;
+                        background: var(--vscode-editorWidget-background, rgba(128,128,128,0.08));
+                        padding: 7px 10px;
+                        margin: 6px 0;
+                        font-size: 12px;
+                    }
+                    .neo-card.ok { border-left-color: var(--vscode-testing-iconPassed, #2ea043); }
+                    .neo-card.warn { border-left-color: var(--vscode-editorWarning-foreground, #d29922); }
+                    .neo-card.err { border-left-color: var(--vscode-editorError-foreground, #f85149); }
+                    .neo-card-title { font-weight: 600; margin-bottom: 3px; }
+                    .neo-card-body { opacity: 0.9; white-space: pre-wrap; }
+                    .file-chip {
+                        display: inline-block;
+                        margin: 2px 4px 2px 0;
+                        padding: 1px 7px;
+                        border-radius: 9px;
+                        font-size: 11px;
+                        font-family: var(--vscode-editor-font-family, monospace);
+                        background: var(--vscode-badge-background, #4d4d4d);
+                        color: var(--vscode-badge-foreground, #fff);
+                        cursor: pointer;
+                    }
+                    .file-chip:hover { opacity: 0.8; text-decoration: underline; }
+                    .task-progress { margin: 4px 0; }
+                    .phase-row { padding: 2px 0; opacity: 0.65; }
+                    .phase-row.active { opacity: 1; font-weight: 600; }
+                    .phase-row.done { opacity: 0.9; }
+                    .phase-row .phase-summary {
+                        font-weight: 400;
+                        opacity: 0.8;
+                        font-size: 11px;
+                        display: block;
+                        padding-left: 20px;
+                    }
+                    .term-card {
+                        display: flex;
+                        align-items: center;
+                        gap: 8px;
+                        margin: 4px 0;
+                        font-family: var(--vscode-editor-font-family, monospace);
+                    }
+                    .term-card code { flex: 1; overflow-x: auto; white-space: nowrap; }
+                    .term-run-btn {
+                        border: 1px solid var(--vscode-button-border, transparent);
+                        background: var(--vscode-button-secondaryBackground, #3a3d41);
+                        color: var(--vscode-button-secondaryForeground, #fff);
+                        border-radius: 3px;
+                        padding: 1px 8px;
+                        font-size: 11px;
+                        cursor: pointer;
+                        white-space: nowrap;
+                    }
+                    .term-run-btn:hover { opacity: 0.85; }
+                    #settingsView {
+                        display: none;
+                        position: fixed;
+                        inset: 0;
+                        z-index: 100;
+                        background: var(--vscode-editor-background, #1e1e1e);
+                        overflow-y: auto;
+                        padding: 12px 16px;
+                    }
+                    #settingsView.open { display: block; }
+                    #settingsView h2 { margin: 0; font-size: 15px; }
+                    .settings-head {
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                        margin-bottom: 10px;
+                    }
+                    .settings-section {
+                        border: 1px solid var(--vscode-panel-border, #444);
+                        border-radius: 4px;
+                        padding: 8px 10px;
+                        margin-bottom: 10px;
+                    }
+                    .settings-section h3 {
+                        margin: 0 0 6px;
+                        font-size: 11px;
+                        text-transform: uppercase;
+                        letter-spacing: 0.05em;
+                        opacity: 0.8;
+                    }
+                    .settings-row {
+                        display: flex;
+                        justify-content: space-between;
+                        gap: 8px;
+                        padding: 2px 0;
+                        font-size: 12px;
+                    }
+                    .settings-row .sr-key { opacity: 0.75; }
+                    .settings-pill {
+                        display: inline-block;
+                        padding: 0 8px;
+                        border-radius: 8px;
+                        font-size: 11px;
+                        background: var(--vscode-badge-background, #4d4d4d);
+                        color: var(--vscode-badge-foreground, #fff);
+                    }
+                    .settings-pill.ok { background: var(--vscode-testing-iconPassed, #2ea043); color: #fff; }
+                    .settings-pill.err { background: var(--vscode-editorError-foreground, #f85149); color: #fff; }
+                    .settings-btn {
+                        border: 1px solid var(--vscode-button-border, transparent);
+                        background: var(--vscode-button-secondaryBackground, #3a3d41);
+                        color: var(--vscode-button-secondaryForeground, #fff);
+                        border-radius: 3px;
+                        padding: 2px 10px;
+                        font-size: 12px;
+                        cursor: pointer;
+                    }
+                    .settings-btn:hover { opacity: 0.85; }
+                    .settings-file { cursor: pointer; color: var(--vscode-textLink-foreground); }
+                    .settings-file:hover { text-decoration: underline; }
                 </style>
             </head>
             <body>
@@ -752,7 +977,17 @@ export class ChatPanel {
                     <div id="headerActions">
                         <button id="newThreadBtn" title="Summarise this thread and start fresh">🔄 New Thread</button>
                         <button id="clearBtn">Clear Session</button>
+                        <button id="settingsBtn" title="Agent NEO settings">⚙️</button>
                     </div>
+                </div>
+                <div id="wsStrip"></div>
+
+                <div id="settingsView">
+                    <div class="settings-head">
+                        <h2>⚙️ Agent NEO Settings</h2>
+                        <button class="settings-btn" data-action="close">✕ Close</button>
+                    </div>
+                    <div id="settingsBody"><em>Loading…</em></div>
                 </div>
 
                 <div id="messages"></div>
@@ -781,27 +1016,141 @@ export class ChatPanel {
                     const micBtn = document.getElementById('micBtn');
                     const suggestionsContainer = document.getElementById('suggestionsContainer');
                     const attachmentPreview = document.getElementById('attachmentPreview');
+                    const wsStrip = document.getElementById('wsStrip');
+                    const settingsView = document.getElementById('settingsView');
+                    const settingsBody = document.getElementById('settingsBody');
+                    const settingsBtn = document.getElementById('settingsBtn');
+
+                    // ── Phase D: run-state tracking + card helpers ──
+                    let runState = null;      // per-run summary data, reset on streamRunStart
+                    let lastContext = null;   // last context_ready payload (shown in settings)
+
+                    function escAttr(s) {
+                        return String(s == null ? '' : s)
+                            .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+                            .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    }
+
+                    // files: array of strings or {path, reason} objects → clickable chips
+                    function fileChipsHtml(files) {
+                        return (files || []).map(f => {
+                            const p = typeof f === 'string' ? f : (f.path || '');
+                            const reason = (f && typeof f === 'object' && f.reason) ? f.reason : '';
+                            return '<span class="file-chip" data-path="' + escAttr(p) +
+                                '" title="' + escAttr(reason) + '">' + escapeHtml(p) + '</span>';
+                        }).join('');
+                    }
+
+                    // Append a progress card inside the live run card (or chat as fallback)
+                    function appendRunCard(html, cls) {
+                        const target = document.getElementById('srSteps') || messagesDiv;
+                        const div = document.createElement('div');
+                        div.className = 'neo-card' + (cls ? ' ' + cls : '');
+                        div.innerHTML = html;
+                        target.appendChild(div);
+                        scrollToBottom();
+                        return div;
+                    }
+
+                    function trackFiles(files) {
+                        if (!runState || !files) return;
+                        files.forEach(f => {
+                            const p = typeof f === 'string' ? f : (f.path || '');
+                            if (p) { runState.files[p] = true; }
+                        });
+                    }
+
+                    settingsBtn.addEventListener('click', () => {
+                        settingsView.classList.add('open');
+                        vscode.postMessage({ type: 'getSettingsInfo' });
+                    });
+
+                    settingsView.addEventListener('click', (e) => {
+                        const chip = e.target.closest('.file-chip');
+                        if (chip && chip.dataset.path) {
+                            vscode.postMessage({ type: 'openFile', path: chip.dataset.path });
+                            return;
+                        }
+                        const el = e.target.closest('[data-action]');
+                        if (!el) return;
+                        const action = el.dataset.action;
+                        if (action === 'close') { settingsView.classList.remove('open'); }
+                        else if (action === 'vscodeSettings') { vscode.postMessage({ type: 'openVSCodeSettings' }); }
+                        else if (action === 'neoTerminal') { vscode.postMessage({ type: 'openNeoTerminal' }); }
+                        else if (action === 'openFile') { vscode.postMessage({ type: 'openFile', path: el.dataset.path }); }
+                    });
+
+                    // Delegated clicks: file chips open files, ▶ buttons run commands
+                    messagesDiv.addEventListener('click', (e) => {
+                        const chip = e.target.closest('.file-chip');
+                        if (chip && chip.dataset.path) {
+                            vscode.postMessage({ type: 'openFile', path: chip.dataset.path });
+                            return;
+                        }
+                        const runBtn = e.target.closest('.term-run-btn');
+                        if (runBtn && runBtn.dataset.cmd) {
+                            vscode.postMessage({ type: 'runInTerminal', command: runBtn.dataset.cmd });
+                        }
+                    });
+
+                    function renderSettings(info) {
+                        let h = '';
+                        h += '<div class="settings-section"><h3>Integrations</h3>';
+                        h += '<div class="settings-row"><span class="sr-key">Backend API</span><span>' + escapeHtml(info.apiUrl || '') + '</span></div>';
+                        h += '<div class="settings-row"><span class="sr-key">Health</span>' +
+                            (info.healthy ? '<span class="settings-pill ok">connected</span>' : '<span class="settings-pill err">unreachable</span>') + '</div>';
+                        h += '<div class="settings-row"><span class="sr-key">API token</span><span>' + (info.tokenSet ? 'configured' : 'not set') + '</span></div>';
+                        h += '<div class="settings-row"><button class="settings-btn" data-action="vscodeSettings">Open VS Code settings</button></div>';
+                        h += '</div>';
+
+                        h += '<div class="settings-section"><h3>Rules &amp; Guidelines</h3>';
+                        if ((info.guidelineFiles || []).length) {
+                            info.guidelineFiles.forEach(name => {
+                                h += '<div class="settings-row"><span class="settings-file" data-action="openFile" data-path="' + escAttr(name) + '">📄 ' + escapeHtml(name) + '</span></div>';
+                            });
+                        } else {
+                            h += '<div class="settings-row"><span class="sr-key">No guideline files (.neo, .neo.md, AGENT.md) found in the workspace root.</span></div>';
+                        }
+                        h += '</div>';
+
+                        h += '<div class="settings-section"><h3>Context</h3>';
+                        if (lastContext) {
+                            h += '<div class="settings-row"><span class="sr-key">Last context pack</span><span>' + (lastContext.files || []).length + ' file(s)</span></div>';
+                            h += '<div>' + fileChipsHtml(lastContext.files) + '</div>';
+                        } else {
+                            h += '<div class="settings-row"><span class="sr-key">Context packs appear here after an AutoRun starts.</span></div>';
+                        }
+                        h += '</div>';
+
+                        h += '<div class="settings-section"><h3>Terminal</h3>';
+                        h += '<div class="settings-row"><span class="sr-key">Commands suggested by the agent run in a dedicated "Agent NEO" terminal.</span></div>';
+                        h += '<div class="settings-row"><button class="settings-btn" data-action="neoTerminal">Open Agent NEO terminal</button></div>';
+                        h += '</div>';
+
+                        h += '<div class="settings-section"><h3>Workspace</h3>';
+                        h += '<div class="settings-row"><span class="sr-key">Folder</span><span>' + escapeHtml(info.workspace || '—') + '</span></div>';
+                        h += '<div class="settings-row"><span class="sr-key">Path</span><span>' + escapeHtml(info.workspacePath || '—') + '</span></div>';
+                        h += '<div class="settings-row"><span class="sr-key">Branch</span><span>' + escapeHtml(info.branch || '—') + '</span></div>';
+                        h += '<div class="settings-row"><span class="sr-key">Pending changes</span><span>' + (info.dirty == null ? '—' : info.dirty) + '</span></div>';
+                        h += '</div>';
+
+                        h += '<div class="settings-section"><h3>Account &amp; Preferences</h3>';
+                        h += '<div class="settings-row"><span class="sr-key">All Agent NEO preferences (API URL, token, model) live under the agentNeo.* settings namespace.</span></div>';
+                        h += '<div class="settings-row"><button class="settings-btn" data-action="vscodeSettings">Manage preferences</button></div>';
+                        h += '</div>';
+
+                        settingsBody.innerHTML = h;
+                    }
 
                     let isLoading = false;
                     let messageCount = 0;           // track thread length
                     const NEW_THREAD_THRESHOLD = 20; // suggest new thread after N messages
                     // SLICE 6 — pending attachments accumulate until message is sent
                     let pendingAttachmentIds = [];
-                    // SLICE 8 — typing debounce timer
-                    let suggestionTimer = null;
-
                     // ── Auto-resize textarea ──
                     messageInput.addEventListener('input', () => {
                         messageInput.style.height = 'auto';
                         messageInput.style.height = messageInput.scrollHeight + 'px';
-                        // SLICE 8 — debounced suggestion fetch (600 ms after last keystroke)
-                        clearTimeout(suggestionTimer);
-                        const val = messageInput.value.trim();
-                        if (val.length >= 2) {
-                            suggestionTimer = setTimeout(() => fetchSuggestions(val), 600);
-                        } else {
-                            clearSuggestions();
-                        }
                     });
 
                     // Send message on Enter (Shift+Enter for new line)
@@ -943,7 +1292,7 @@ export class ChatPanel {
                         const message = messageInput.value.trim();
                         if (!message || isLoading) return;
 
-                        // Clear input and suggestions
+                        // Clear input
                         messageInput.value = '';
                         messageInput.style.height = 'auto';
                         clearSuggestions();
@@ -971,12 +1320,9 @@ export class ChatPanel {
                             );
                         }
 
-                        // Send to extension
-                        vscode.postMessage({
-                            type: 'sendMessage',
-                            message: message,
-                            attachmentIds: attachmentIds.length > 0 ? attachmentIds : undefined
-                        });
+                        // Action-first: every non-slash message triggers the streaming agent loop
+                        // so the agent immediately starts working with tools instead of chatting.
+                        vscode.postMessage({ type: 'autoRun', task: message });
                     }
 
                     function clearSession() {
@@ -1371,6 +1717,11 @@ export class ChatPanel {
 
                             // ── Live streaming run card ──────────────────────────
                             case 'streamRunStart': {
+                                runState = {
+                                    files: {}, commits: [], repairAttempts: 0,
+                                    blocked: false, reverted: false, halted: false,
+                                    haltReason: '', verification: null
+                                };
                                 // Create a live card element we'll update in-place
                                 const card = document.createElement('div');
                                 card.className = 'message assistant';
@@ -1395,24 +1746,132 @@ export class ChatPanel {
                                 if (ev.type === 'text' && tokensEl) {
                                     tokensEl.textContent += ev.content || '';
                                     scrollToBottom();
+
+                                // ── Context (Phase B) ──
+                                } else if (ev.type === 'context_ready') {
+                                    lastContext = ev;
+                                    appendRunCard(
+                                        '<div class="neo-card-title">📚 Context gathered</div>' +
+                                        (ev.summary ? '<div class="neo-card-body">' + escapeHtml(ev.summary) + '</div>' : '') +
+                                        '<div>' + fileChipsHtml(ev.files) + '</div>'
+                                    );
+
+                                // ── Phased planning / task progress ──
+                                } else if (ev.type === 'planning') {
+                                    if (headerEl) { headerEl.innerHTML = '🧭 <strong>Planning:</strong> ' + escapeHtml(ev.task || ''); }
+                                } else if (ev.type === 'phase_plan') {
+                                    let rows = '';
+                                    (ev.phases || []).forEach((p, i) => {
+                                        rows += '<div class="phase-row" id="phase_row_' + escAttr(p.id) + '">⬜ ' + (i + 1) + '. ' + escapeHtml(p.name || p.id) +
+                                            (p.specialist ? ' <span style="opacity:.6">(' + escapeHtml(p.specialist) + ')</span>' : '') + '</div>';
+                                    });
+                                    appendRunCard('<div class="neo-card-title">🗂️ Plan — ' + (ev.phases || []).length + ' phase(s)</div>' +
+                                        '<div class="task-progress">' + rows + '</div>');
+                                } else if (ev.type === 'phase_start') {
+                                    const row = document.getElementById('phase_row_' + ev.phase_id);
+                                    const num = typeof ev.phase_index === 'number' ? (ev.phase_index + 1) : '?';
+                                    if (row) {
+                                        row.classList.add('active');
+                                        row.innerHTML = '▶️ ' + num + '. ' + escapeHtml(ev.phase_name || ev.phase_id || '') +
+                                            (ev.specialist ? ' <span style="opacity:.6">(' + escapeHtml(ev.specialist) + ')</span>' : '');
+                                    }
+                                    if (headerEl) {
+                                        headerEl.innerHTML = '⚙️ <strong>Phase ' + num + '/' + (ev.total_phases || '?') + ':</strong> ' + escapeHtml(ev.phase_name || '');
+                                    }
+                                    scrollToBottom();
+                                } else if (ev.type === 'phase_end') {
+                                    const row = document.getElementById('phase_row_' + ev.phase_id);
+                                    if (row) {
+                                        row.classList.remove('active');
+                                        row.classList.add('done');
+                                        row.innerHTML = '✅ ' + escapeHtml(ev.phase_name || ev.phase_id || '') +
+                                            (ev.summary ? '<span class="phase-summary">' + escapeHtml((ev.summary || '').slice(0, 200)) + '</span>' : '');
+                                    }
+                                } else if (ev.type === 'phase_checkpoint') {
+                                    trackFiles(ev.files);
+                                    if (runState && ev.commit_sha) { runState.commits.push(ev.commit_sha); }
+                                    appendRunCard('<div class="neo-card-title">🔖 Phase checkpoint — ' + escapeHtml((ev.commit_sha || '').slice(0, 8)) + '</div>' +
+                                        '<div>' + fileChipsHtml(ev.files) + '</div>', 'ok');
+
+                                // ── Tool activity ──
                                 } else if (ev.type === 'tool_start' && stepsEl) {
                                     const row = document.createElement('div');
                                     row.className = 'auto-run-step';
                                     row.id = 'sr_tool_' + (ev.tool || 'unknown');
-                                    row.innerHTML = '🔧 <strong>' + escapeHtml(ev.tool || '') + '</strong> <span style="opacity:.6">running…</span>';
+                                    const detail = ev.path || ev.command || ev.query || '';
+                                    row.innerHTML = '🔧 <strong>' + escapeHtml(ev.tool || '') + '</strong>' +
+                                        (detail ? ' <span style="opacity:.7">' + escapeHtml(String(detail).slice(0, 80)) + '</span>' : '') +
+                                        ' <span style="opacity:.6">running…</span>';
                                     stepsEl.appendChild(row);
                                     scrollToBottom();
                                 } else if (ev.type === 'tool_end' && stepsEl) {
                                     const existing = document.getElementById('sr_tool_' + ev.tool);
                                     const ms = ev.duration_ms ? ' (' + ev.duration_ms + 'ms)' : '';
-                                    const snippet = (ev.result || '').slice(0, 120);
                                     const row = existing || document.createElement('div');
                                     row.className = 'auto-run-step step-success';
-                                    row.innerHTML = '✅ <strong>' + escapeHtml(ev.tool || '') + '</strong>' + ms +
-                                        (snippet ? '<br><span class="step-msg">' + escapeHtml(snippet) + '</span>' : '');
+                                    if (ev.tool === 'run_command' && ev.command) {
+                                        // Terminal action card — user can replay in the Agent NEO terminal
+                                        row.innerHTML = '✅ <strong>run_command</strong>' + ms +
+                                            '<div class="term-card"><code>' + escapeHtml(ev.command) + '</code>' +
+                                            '<button class="term-run-btn" data-cmd="' + escAttr(ev.command) + '">▶ Run in terminal</button></div>' +
+                                            (ev.result ? '<span class="step-msg">' + escapeHtml((ev.result || '').slice(0, 120)) + '</span>' : '');
+                                    } else {
+                                        const detail = ev.path || ev.query || '';
+                                        const snippet = (ev.result || '').slice(0, 120);
+                                        row.innerHTML = '✅ <strong>' + escapeHtml(ev.tool || '') + '</strong>' +
+                                            (detail ? ' <span style="opacity:.7">' + escapeHtml(String(detail).slice(0, 80)) + '</span>' : '') + ms +
+                                            (snippet ? '<br><span class="step-msg">' + escapeHtml(snippet) + '</span>' : '');
+                                    }
                                     if (!existing) { stepsEl.appendChild(row); }
+                                    if (ev.tool === 'write_file' && ev.path) { trackFiles([ev.path]); }
                                     scrollToBottom();
+
+                                // ── Verification + repair (Phase C) ──
+                                } else if (ev.type === 'verification_started') {
+                                    appendRunCard('<div class="neo-card-title">🧪 Verification running…</div>');
+                                } else if (ev.type === 'verification_passed') {
+                                    appendRunCard('<div class="neo-card-title">🧪 Verification passed</div>' +
+                                        '<div class="neo-card-body">' + (ev.checks_run || []).length + ' check(s), ' + (ev.repair_attempts || 0) + ' repair attempt(s)</div>', 'ok');
+                                } else if (ev.type === 'verification_failed') {
+                                    appendRunCard('<div class="neo-card-title">🧪 Verification failed</div>' +
+                                        '<div class="neo-card-body">' + escapeHtml((ev.failure_summary || '').slice(0, 400)) + '</div>', 'err');
+                                } else if (ev.type === 'repair_started') {
+                                    if (runState) { runState.repairAttempts = ev.attempt || (runState.repairAttempts + 1); }
+                                    appendRunCard('<div class="neo-card-title">🔧 Repair attempt ' + (ev.attempt || '?') + '/' + (ev.max_repair_attempts || '?') + '…</div>', 'warn');
+                                } else if (ev.type === 'repair_succeeded') {
+                                    appendRunCard('<div class="neo-card-title">🔧 Repair attempt ' + (ev.attempt || '?') + ' succeeded</div>', 'ok');
+                                } else if (ev.type === 'repair_exhausted') {
+                                    appendRunCard('<div class="neo-card-title">🔧 Repair attempts exhausted (' + (ev.repair_attempts || 0) + '/' + (ev.max_repair_attempts || '?') + ')</div>' +
+                                        '<div class="neo-card-body">' + escapeHtml((ev.failure_summary || '').slice(0, 400)) + '</div>', 'err');
+                                } else if (ev.type === 'verification_summary') {
+                                    if (runState) { runState.verification = ev; }
+
+                                // ── Gate / outcome (Phase A) ──
+                                } else if (ev.type === 'change_set_blocked') {
+                                    if (runState) { runState.blocked = true; runState.reverted = !!ev.reverted; }
+                                    trackFiles(ev.files);
+                                    appendRunCard(
+                                        '<div class="neo-card-title">⛔ Changes blocked by governance</div>' +
+                                        '<div class="neo-card-body">' + escapeHtml(((ev.errors || []).join('; ')).slice(0, 400)) + '</div>' +
+                                        '<div>' + fileChipsHtml(ev.files) + '</div>' +
+                                        (ev.reverted ? '<div class="neo-card-body">↩️ All staged edits were reverted.</div>' : ''),
+                                        'err'
+                                    );
+                                } else if (ev.type === 'run_halted') {
+                                    if (runState) {
+                                        runState.halted = true;
+                                        runState.haltReason = ev.reason || '';
+                                        if (ev.reverted) { runState.reverted = true; }
+                                    }
+                                    appendRunCard('<div class="neo-card-title">🛑 Run halted' + (ev.phase_name ? ' — ' + escapeHtml(ev.phase_name) : '') + '</div>' +
+                                        '<div class="neo-card-body">' + escapeHtml(ev.reason || '') + '</div>' +
+                                        (ev.reverted ? '<div class="neo-card-body">↩️ Changes reverted.</div>' : ''), 'err');
+                                } else if (ev.type === 'no_changes') {
+                                    appendRunCard('<div class="neo-card-title">ℹ️ No file changes were made</div>');
+
+                                // ── Run completion ──
                                 } else if (ev.type === 'finish') {
+                                    trackFiles(ev.files);
                                     if (headerEl) {
                                         headerEl.innerHTML = (ev.success ? '✅' : '❌') + ' <strong>AutoRun done</strong>';
                                     }
@@ -1421,6 +1880,8 @@ export class ChatPanel {
                                     }
                                     scrollToBottom();
                                 } else if (ev.type === 'commit') {
+                                    trackFiles(ev.files);
+                                    if (runState && ev.sha) { runState.commits.push(ev.sha); }
                                     const card = document.getElementById('streamRunCard');
                                     if (card) {
                                         const c = document.createElement('div');
@@ -1428,6 +1889,12 @@ export class ChatPanel {
                                         c.textContent = '🔖 Committed: ' + (ev.sha || '').slice(0, 8);
                                         card.querySelector('.auto-run-card')?.appendChild(c);
                                     }
+                                } else if (ev.type === 'phased_done') {
+                                    if (runState && ev.verification) { runState.verification = ev.verification; }
+                                    if (headerEl) {
+                                        headerEl.innerHTML = '✅ <strong>Phased run complete</strong> — ' + (ev.total_phases || 0) + ' phase(s), ' + (ev.files_written || 0) + ' file(s)';
+                                    }
+                                    scrollToBottom();
                                 } else if (ev.type === 'error') {
                                     if (headerEl) {
                                         headerEl.innerHTML = '❌ <strong>Error:</strong> ' + escapeHtml(ev.error || 'Unknown error');
@@ -1440,8 +1907,64 @@ export class ChatPanel {
                                 // Remove the live card ID so future events don't affect it
                                 const card = document.getElementById('streamRunCard');
                                 if (card) { card.removeAttribute('id'); }
+                                // Final run summary card
+                                if (runState) {
+                                    const files = Object.keys(runState.files);
+                                    const v = runState.verification;
+                                    let status;
+                                    if (runState.blocked) {
+                                        status = '⛔ Blocked by governance' + (runState.reverted ? ' — changes reverted' : '');
+                                    } else if (runState.halted) {
+                                        status = '🛑 Halted — ' + (runState.haltReason || 'see details above') + (runState.reverted ? ' (changes reverted)' : '');
+                                    } else if (runState.commits.length) {
+                                        status = '✅ Committed (' + runState.commits.map(s => (s || '').slice(0, 8)).join(', ') + ')';
+                                    } else if (files.length) {
+                                        status = '✅ Completed';
+                                    } else {
+                                        status = 'ℹ️ Finished — no file changes';
+                                    }
+                                    let h = '<div class="neo-card-title">📋 Run summary</div>';
+                                    h += '<div class="neo-card-body">' + escapeHtml(status) + '</div>';
+                                    if (files.length) {
+                                        h += '<div style="margin-top:4px"><strong>Files changed (' + files.length + '):</strong></div>';
+                                        h += '<div>' + fileChipsHtml(files) + '</div>';
+                                    }
+                                    if (v) {
+                                        h += '<div style="margin-top:4px"><strong>Verification:</strong> ' + escapeHtml(v.final_status || '') +
+                                            ' — ' + (v.checks_run || []).length + ' check(s), ' + (v.repair_attempts || 0) + ' repair attempt(s)</div>';
+                                        if (v.last_failure_summary) {
+                                            h += '<div class="neo-card-body">' + escapeHtml((v.last_failure_summary || '').slice(0, 300)) + '</div>';
+                                        }
+                                    } else if (runState.repairAttempts) {
+                                        h += '<div style="margin-top:4px"><strong>Repair attempts:</strong> ' + runState.repairAttempts + '</div>';
+                                    }
+                                    const wrapper = document.createElement('div');
+                                    wrapper.className = 'message assistant';
+                                    const summaryCls = (runState.blocked || runState.halted) ? ' err' : ' ok';
+                                    wrapper.innerHTML = '<div class="neo-card' + summaryCls + '">' + h + '</div>';
+                                    messagesDiv.appendChild(wrapper);
+                                    scrollToBottom();
+                                    runState = null;
+                                }
                                 isLoading = false;
                                 sendBtn.disabled = false;
+                                break;
+                            }
+
+                            // ── Workspace strip (host pushes git/folder info) ──
+                            case 'workspaceInfo': {
+                                let h = '';
+                                if (message.workspace) { h += '<span class="ws-item">📁 ' + escapeHtml(message.workspace) + '</span>'; }
+                                if (message.branch) { h += '<span class="ws-item">⎇ ' + escapeHtml(message.branch) + '</span>'; }
+                                if (message.dirty != null) {
+                                    h += '<span class="ws-item">' + (message.dirty > 0 ? '● ' + message.dirty + ' pending change(s)' : '✓ clean') + '</span>';
+                                }
+                                wsStrip.innerHTML = h;
+                                break;
+                            }
+
+                            case 'settingsInfo': {
+                                renderSettings(message);
                                 break;
                             }
                         }
@@ -1461,7 +1984,7 @@ export class ChatPanel {
     private async handleNewThread() {
         if (!this.sessionId) { return; }
         try {
-            this.panel?.webview.postMessage({ type: 'loading', loading: true });
+            this.post({ type: 'loading', loading: true });
             const result = await this.apiClient.summarizeSession(this.sessionId);
 
             // Switch the active session
@@ -1471,7 +1994,7 @@ export class ChatPanel {
             vscode.window.showInformationMessage(
                 `New thread started (${result.message_count_was} messages summarised).`
             );
-            this.panel?.webview.postMessage({
+            this.post({
                 type: 'threadSwitched',
                 newSessionId: result.new_session_id,
                 summary: result.summary,
@@ -1480,12 +2003,12 @@ export class ChatPanel {
             });
         } catch (error: any) {
             vscode.window.showErrorMessage(`Failed to start new thread: ${error.message}`);
-            this.panel?.webview.postMessage({
+            this.post({
                 type: 'error',
                 message: `Failed to start new thread: ${error.message}`
             });
         } finally {
-            this.panel?.webview.postMessage({ type: 'loading', loading: false });
+            this.post({ type: 'loading', loading: false });
         }
     }
 
@@ -1501,22 +2024,22 @@ export class ChatPanel {
         if (confirm !== 'Yes, roll back') { return; }
 
         try {
-            this.panel?.webview.postMessage({ type: 'loading', loading: true });
+            this.post({ type: 'loading', loading: true });
             const result = await this.apiClient.rollbackLastChange(this.sessionId);
             const icon = result.success ? '✓' : '✗';
             vscode.window.showInformationMessage(`${icon} ${result.message}`);
-            this.panel?.webview.postMessage({
+            this.post({
                 type: 'assistantMessage',
                 message: `${icon} **Rollback**: ${result.message}`
             });
         } catch (error: any) {
             vscode.window.showErrorMessage(`Rollback failed: ${error.message}`);
-            this.panel?.webview.postMessage({
+            this.post({
                 type: 'error',
                 message: `Rollback failed: ${error.message}`
             });
         } finally {
-            this.panel?.webview.postMessage({ type: 'loading', loading: false });
+            this.post({ type: 'loading', loading: false });
         }
     }
 
@@ -1535,7 +2058,7 @@ export class ChatPanel {
                 fileType,
                 contentBase64
             );
-            this.panel?.webview.postMessage({
+            this.post({
                 type: 'attachmentUploaded',
                 attachmentId: result.attachment_id,
                 fileName: result.file_name,
@@ -1543,7 +2066,7 @@ export class ChatPanel {
             });
         } catch (error: any) {
             console.error('Attachment upload failed:', error);
-            this.panel?.webview.postMessage({
+            this.post({
                 type: 'attachmentError',
                 message: `Upload failed: ${error.message}`
             });
@@ -1560,7 +2083,7 @@ export class ChatPanel {
                 return;
             }
             const result = await this.apiClient.getSuggestions(currentInput, this.sessionId, context);
-            this.panel?.webview.postMessage({
+            this.post({
                 type: 'suggestions',
                 suggestions: result.suggestions || []
             });
@@ -1578,10 +2101,10 @@ export class ChatPanel {
     private async handleAutoRun(task: string) {
         if (!task) { return; }
 
-        // Show the user's /run message immediately
-        this.panel?.webview.postMessage({ type: 'userMessage', message: `/run ${task}` });
+        // Echo the user's task into the chat exactly as typed
+        this.post({ type: 'userMessage', message: task });
         // Open a live streaming card in the webview
-        this.panel?.webview.postMessage({ type: 'streamRunStart', task });
+        this.post({ type: 'streamRunStart', task });
 
         const context = this.getCurrentContext();
         const { url, token } = this.apiClient.getStreamConfig();
@@ -1628,7 +2151,7 @@ export class ChatPanel {
                     try {
                         const event = JSON.parse(json);
                         // Forward every SSE event directly to the webview
-                        this.panel?.webview.postMessage({ type: 'streamEvent', event });
+                        this.post({ type: 'streamEvent', event });
                         // File reveal: open written files in the VS Code editor
                         if (event.type === 'tool_end' && event.tool === 'write_file' && event.path) {
                             this._revealFile(event.path);
@@ -1640,12 +2163,12 @@ export class ChatPanel {
             }
         } catch (error: any) {
             console.error('AutoRun stream failed:', error);
-            this.panel?.webview.postMessage({
+            this.post({
                 type: 'streamEvent',
                 event: { type: 'error', error: error.message }
             });
         } finally {
-            this.panel?.webview.postMessage({ type: 'streamRunDone' });
+            this.post({ type: 'streamRunDone' });
         }
     }
 
@@ -1664,6 +2187,101 @@ export class ChatPanel {
         } catch {
             // file might not be in the current workspace — silently skip
         }
+    }
+
+    /**
+     * Resolve VS Code's built-in Git API (repository 0) — null when unavailable.
+     */
+    private async _getGitRepo(): Promise<any> {
+        if (this.gitRepo) { return this.gitRepo; }
+        try {
+            const gitExt = vscode.extensions.getExtension<any>('vscode.git');
+            if (!gitExt) { return null; }
+            if (!gitExt.isActive) { await gitExt.activate(); }
+            const api = gitExt.exports?.getAPI?.(1);
+            const repo = api?.repositories?.[0] ?? null;
+            if (repo) {
+                this.gitRepo = repo;
+                // Push fresh workspace info on git state changes (debounced)
+                repo.state.onDidChange(() => {
+                    if (this.workspaceInfoTimer) { clearTimeout(this.workspaceInfoTimer); }
+                    this.workspaceInfoTimer = setTimeout(() => this.postWorkspaceInfo(), 500);
+                }, undefined, this.context.subscriptions);
+            }
+            return repo;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Gather workspace + git info and push it to the webview header strip.
+     */
+    private async initWorkspaceInfo() {
+        await this._getGitRepo();
+        this.postWorkspaceInfo();
+    }
+
+    private postWorkspaceInfo() {
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        const info: any = {
+            type: 'workspaceInfo',
+            workspace: folder?.name ?? null,
+            branch: null,
+            dirty: null,
+        };
+        try {
+            const repo = this.gitRepo;
+            if (repo) {
+                info.branch = repo.state.HEAD?.name ?? null;
+                info.dirty =
+                    (repo.state.workingTreeChanges?.length ?? 0) +
+                    (repo.state.indexChanges?.length ?? 0);
+            }
+        } catch {
+            // git info is best-effort — workspace name still shown
+        }
+        this.post(info);
+    }
+
+    /**
+     * Gather data for the in-webview settings surface.
+     */
+    private async handleGetSettingsInfo() {
+        const config = vscode.workspace.getConfiguration('agentNeo');
+        const folder = vscode.workspace.workspaceFolders?.[0];
+
+        const guidelineFiles: string[] = [];
+        if (folder) {
+            for (const name of ['.neo', '.neo.md', 'AGENT.md']) {
+                try {
+                    const p = path.join(folder.uri.fsPath, name);
+                    if (fs.existsSync(p) && fs.statSync(p).isFile()) {
+                        guidelineFiles.push(name);
+                    }
+                } catch {
+                    // unreadable entry — skip
+                }
+            }
+        }
+
+        const healthy = await this.apiClient.checkHealth();
+        const repo = await this._getGitRepo();
+
+        this.post({
+            type: 'settingsInfo',
+            apiUrl: config.get('apiUrl', 'http://127.0.0.1:8000'),
+            tokenSet: !!config.get('apiToken', ''),
+            healthy,
+            guidelineFiles,
+            workspace: folder?.name ?? null,
+            workspacePath: folder?.uri.fsPath ?? null,
+            branch: repo?.state?.HEAD?.name ?? null,
+            dirty: repo
+                ? (repo.state.workingTreeChanges?.length ?? 0) +
+                  (repo.state.indexChanges?.length ?? 0)
+                : null,
+        });
     }
 
     /**
@@ -1689,8 +2307,8 @@ export class ChatPanel {
         const path = require('path') as typeof import('path');
         const clonePath = path.join(destDir, repoName);
 
-        this.panel?.webview.postMessage({ type: 'userMessage', message: `/clone ${url}` });
-        this.panel?.webview.postMessage({ type: 'loading', loading: true });
+        this.post({ type: 'userMessage', message: `/clone ${url}` });
+        this.post({ type: 'loading', loading: true });
 
         const clonePromise = new Promise<void>((resolve, reject) => {
             // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -1712,9 +2330,9 @@ export class ChatPanel {
             await vscode.commands.executeCommand('vscode.openFolder', folderUri, { forceNewWindow: false });
         }).catch((err: Error) => {
             vscode.window.showErrorMessage(`Clone failed: ${err.message}`);
-            this.panel?.webview.postMessage({ type: 'error', message: `Clone failed: ${err.message}` });
+            this.post({ type: 'error', message: `Clone failed: ${err.message}` });
         }).finally(() => {
-            this.panel?.webview.postMessage({ type: 'loading', loading: false });
+            this.post({ type: 'loading', loading: false });
         });
     }
 
