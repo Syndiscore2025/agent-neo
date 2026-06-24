@@ -19,7 +19,12 @@ _BLOCKED = re.compile(
     r"(rm\s+-rf|git\s+push|git\s+reset\s+--hard|sudo|chmod\s+777"
     r"|mkfs|dd\s+if=|curl.*\|\s*sh|wget.*\|\s*sh|>\s*/dev/sd)"
 )
-_SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build", ".next"}
+_SKIP_DIRS = {
+    ".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build", ".next",
+    # Dependency / buildpack runtime trees — never walk these. ".heroku" and
+    # "site-packages" appear on Heroku-style deploys (incl. DO App Platform).
+    ".heroku", "site-packages", ".mypy_cache", ".pytest_cache", ".cache",
+}
 
 # ── Anthropic-format tool schemas ─────────────────────────────────────────────
 TOOL_SCHEMAS = [

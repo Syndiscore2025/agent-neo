@@ -30,6 +30,9 @@ CONVENTION_NAMES = {
 _SKIP_DIRS = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
     "dist", "build", ".next", ".neo",
+    # Dependency / buildpack runtime trees — never index these. ".heroku" and
+    # "site-packages" appear on Heroku-style deploys (incl. DO App Platform).
+    ".heroku", "site-packages", ".mypy_cache", ".pytest_cache", ".cache",
 }
 
 _LANGUAGE_BY_SUFFIX = {
