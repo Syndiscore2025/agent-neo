@@ -2202,6 +2202,14 @@ class ChatPanel {
 
                             // ── Live streaming run card ──────────────────────────
                             case 'streamRunStart': {
+                                // Neutralise any stale live-card ids left over from a prior run.
+                                // streamRunDone only clears the outer id, so the inner ids
+                                // (srHeader/srSteps/srTokens) could otherwise duplicate and make
+                                // getElementById target the OLD card above the new question.
+                                ['streamRunCard', 'srHeader', 'srSteps', 'srTokens'].forEach(id => {
+                                    const stale = document.getElementById(id);
+                                    if (stale) { stale.removeAttribute('id'); }
+                                });
                                 // Any thread still 'running' here lost its stream — mark interrupted
                                 threads.forEach(t => { if (t.status === 'running') { t.status = 'interrupted'; } });
                                 const runId = 'run_' + Date.now();
@@ -2424,9 +2432,17 @@ class ChatPanel {
                             }
 
                             case 'streamRunDone': {
-                                // Remove the live card ID so future events don't affect it
+                                // Remove the live card id AND its inner ids so future events
+                                // (and the next run's streamRunStart) can't accidentally target
+                                // this finished card via getElementById.
                                 const card = document.getElementById('streamRunCard');
-                                if (card) { card.removeAttribute('id'); }
+                                if (card) {
+                                    card.removeAttribute('id');
+                                    ['srHeader', 'srSteps', 'srTokens'].forEach(id => {
+                                        const inner = card.querySelector('#' + id);
+                                        if (inner) { inner.removeAttribute('id'); }
+                                    });
+                                }
                                 // Final run summary card
                                 if (runState) {
                                     const files = Object.keys(runState.files);
