@@ -2,7 +2,7 @@
   "name": "agent-neo-vscode",
   "displayName": "Agent NEO",
   "description": "Interactive coding partner powered by Agent NEO",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "publisher": "agent-neo",
   "engines": {
     "vscode": "^1.85.0"
@@ -65,6 +65,14 @@
       {
         "command": "agent-neo.manageCliTools",
         "title": "Agent NEO: Manage CLI Tools"
+      },
+      {
+        "command": "agent-neo.toggleBackend",
+        "title": "Agent NEO: Toggle Agent Backend (Neo / Auggie)"
+      },
+      {
+        "command": "agent-neo.stopAuggie",
+        "title": "Agent NEO: Stop Auggie Session"
       }
     ],
     "viewsContainers": {
@@ -131,6 +139,21 @@
           "type": "boolean",
           "default": true,
           "description": "Enable prompt suggestions"
+        },
+        "agentNeo.agentBackend": {
+          "type": "string",
+          "enum": ["neo", "auggie"],
+          "enumDescriptions": [
+            "Use the Agent NEO backend (HTTP API at agentNeo.apiUrl)",
+            "Use the Auggie CLI as a local subprocess (requires 'auggie' installed and 'auggie login')"
+          ],
+          "default": "neo",
+          "description": "Which agent runs your prompts: the Neo backend or the local Auggie CLI."
+        },
+        "agentNeo.auggiePath": {
+          "type": "string",
+          "default": "auggie",
+          "description": "Path or command used to launch the Auggie CLI (defaults to 'auggie' on PATH)."
         }
       }
     }

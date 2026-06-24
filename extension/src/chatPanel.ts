@@ -9,6 +9,7 @@ import * as fs from 'fs';
 import { ApiClient } from './apiClient';
 import { NeoStorage } from './storage';
 import { IntegrationsManager } from './integrations';
+import { AuggieRunner } from './auggieRunner';
 
 export class ChatPanel implements vscode.WebviewViewProvider {
     public static readonly viewId = 'agent-neo.chatView';
@@ -21,6 +22,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     private apiClient: ApiClient;
     private storage: NeoStorage;
     private integrations: IntegrationsManager;
+    private auggie: AuggieRunner = new AuggieRunner();
     private sessionId: string | undefined;
     private selectedModel: string = ''; // empty → backend DEFAULT_MODEL
 
@@ -188,6 +190,9 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                 break;
             case 'openVSCodeSettings':
                 void vscode.commands.executeCommand('workbench.action.openSettings', 'agentNeo');
+                break;
+            case 'setBackend':
+                await this.handleSetBackend(message.backend);
                 break;
             case 'openDiff':
                 await this._openDiff(message.path, message.ref, message.old);
@@ -365,6 +370,21 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         this.post({
             type: 'sessionCleared'
         });
+    }
+
+    /**
+     * Switch the agent backend (Neo HTTP API ↔ local Auggie CLI) and refresh
+     * the settings overlay so the change is visible immediately.
+     */
+    private async handleSetBackend(backend: string) {
+        const value = backend === 'auggie' ? 'auggie' : 'neo';
+        await vscode.workspace
+            .getConfiguration('agentNeo')
+            .update('agentBackend', value, vscode.ConfigurationTarget.Global);
+        vscode.window.showInformationMessage(
+            'Agent backend set to ' + (value === 'auggie' ? 'Auggie CLI (local)' : 'Neo backend') + '.'
+        );
+        await this.handleGetSettingsInfo();
     }
 
     /**
@@ -1427,6 +1447,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                         const action = el.dataset.action;
                         if (action === 'close') { settingsView.classList.remove('open'); scheduleSaveState(); }
                         else if (action === 'vscodeSettings') { vscode.postMessage({ type: 'openVSCodeSettings' }); }
+                        else if (action === 'toggleBackend') { vscode.postMessage({ type: 'setBackend', backend: (lastSettingsInfo && lastSettingsInfo.agentBackend === 'auggie') ? 'neo' : 'auggie' }); }
                         else if (action === 'neoTerminal') { vscode.postMessage({ type: 'openNeoTerminal' }); }
                         else if (action === 'openFile') { vscode.postMessage({ type: 'openFile', path: el.dataset.path }); }
                         else if (action === 'manageRepos') { vscode.postMessage({ type: 'manageRepos' }); }
@@ -1462,6 +1483,10 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                         h += '<div class="settings-row"><span class="sr-key">Health</span>' +
                             (info.healthy ? '<span class="settings-pill ok">connected</span>' : '<span class="settings-pill err">unreachable</span>') + '</div>';
                         h += '<div class="settings-row"><span class="sr-key">API token</span><span>' + (info.tokenSet ? 'configured' : 'not set') + '</span></div>';
+                        h += '<div class="settings-row"><span class="sr-key">Agent backend</span><span>' +
+                            (info.agentBackend === 'auggie' ? 'Auggie CLI (local)' : 'Neo backend') + '</span></div>';
+                        h += '<div class="settings-row"><button class="settings-btn" data-action="toggleBackend">Switch to ' +
+                            (info.agentBackend === 'auggie' ? 'Neo backend' : 'Auggie CLI') + '</button></div>';
                         h += '<div class="settings-row"><button class="settings-btn" data-action="vscodeSettings">Open VS Code settings</button></div>';
                         h += '</div>';
 
@@ -1806,12 +1831,12 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                     }
 
                     function clearSession() {
-                        if (confirm('Clear chat session?')) {
-                            pendingAttachmentIds = [];
-                            attachmentPreview.innerHTML = '';
-                            clearSuggestions();
-                            vscode.postMessage({ type: 'clearSession' });
-                        }
+                        // confirm() is disabled inside VS Code webviews, so clear directly.
+                        pendingAttachmentIds = [];
+                        attachmentPreview.innerHTML = '';
+                        clearSuggestions();
+                        messagesDiv.innerHTML = '';
+                        vscode.postMessage({ type: 'clearSession' });
                     }
 
                     // ── SLICE 8 — Suggestions ──
@@ -2225,7 +2250,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                                 card.dataset.runId = runId;
                                 card.innerHTML =
                                     '<div class="auto-run-card">' +
-                                    '<div class="auto-run-header" id="srHeader">⚙️ <strong>Running:</strong> ' + escapeHtml(message.task) + '</div>' +
+                                    '<div class="auto-run-header" id="srHeader">⚙️ <strong>Running…</strong></div>' +
                                     '<div class="auto-run-steps" id="srSteps"></div>' +
                                     '<div id="srTokens" style="font-style:italic;opacity:0.75;font-size:12px;padding-top:4px;white-space:pre-wrap"></div>' +
                                     '</div>';
@@ -2411,7 +2436,16 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                                 } else if (ev.type === 'error') {
                                     if (runState) { runState.error = true; }
                                     if (headerEl) {
-                                        headerEl.innerHTML = '❌ <strong>Error:</strong> ' + escapeHtml(ev.error || 'Unknown error');
+                                        var rawErr = ev.error || 'Unknown error';
+                                        var friendlyErr = rawErr;
+                                        if (rawErr.indexOf('401') !== -1) {
+                                            friendlyErr = '401 — token rejected. Make sure agentNeo.apiToken matches the server AGENT_NEO_TOKEN, then run Developer: Reload Window.';
+                                        } else if (rawErr.indexOf('403') !== -1) {
+                                            friendlyErr = '403 — forbidden. The backend rejected this request.';
+                                        } else if (rawErr.indexOf('Failed to fetch') !== -1 || rawErr.indexOf('ECONNREFUSED') !== -1) {
+                                            friendlyErr = 'Could not reach the backend. Check agentNeo.apiUrl, then reload the window.';
+                                        }
+                                        headerEl.innerHTML = '❌ <strong>Error:</strong> ' + escapeHtml(friendlyErr);
                                     }
                                 }
                                 break;
@@ -2557,7 +2591,12 @@ export class ChatPanel implements vscode.WebviewViewProvider {
      * Handle "Continue in New Thread" — summarise + switch session.
      */
     private async handleNewThread() {
-        if (!this.sessionId) { return; }
+        if (!this.sessionId) {
+            // No active session yet — just present a fresh, empty thread.
+            this.post({ type: 'sessionCleared' });
+            vscode.window.showInformationMessage('Started a fresh thread.');
+            return;
+        }
         try {
             this.post({ type: 'loading', loading: true });
             const result = await this.apiClient.summarizeSession(this.sessionId);
@@ -2686,6 +2725,15 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         // Open a live streaming card in the webview
         this.post({ type: 'streamRunStart', task, preRunRef });
 
+        // Backend selection: local Auggie CLI vs the Neo HTTP backend.
+        const backend = vscode.workspace
+            .getConfiguration('agentNeo')
+            .get<string>('agentBackend', 'neo');
+        if (backend === 'auggie') {
+            await this.runAuggie(task);
+            return;
+        }
+
         const context = this.getCurrentContext();
         const { url, token } = this.apiClient.getStreamConfig();
 
@@ -2750,6 +2798,67 @@ export class ChatPanel implements vscode.WebviewViewProvider {
             });
         } finally {
             this.post({ type: 'streamRunDone' });
+        }
+    }
+
+    /**
+     * Run a task through the Auggie CLI instead of the Neo backend.
+     * Streams output into the same run card; afterwards lists changed files
+     * from git WITHOUT committing or pushing — the user reviews and commits
+     * manually in Source Control (explicit-approval safety control).
+     */
+    private async runAuggie(task: string) {
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        if (!folder) {
+            this.post({ type: 'streamEvent', event: { type: 'error', error: 'Open a workspace folder to use the Auggie backend.' } });
+            this.post({ type: 'streamRunDone' });
+            return;
+        }
+        try {
+            await this.auggie.run(task, folder.uri.fsPath, (ev) => {
+                this.post({ type: 'streamEvent', event: ev });
+            });
+            // Post-run: surface changed files (no auto-commit / no push).
+            const repo = await this._getGitRepo();
+            const changes = [
+                ...(repo?.state?.workingTreeChanges ?? []),
+                ...(repo?.state?.indexChanges ?? []),
+            ];
+            const files = changes.map((c: any) => ({ path: vscode.workspace.asRelativePath(c.uri) }));
+            const summary = files.length
+                ? 'Auggie changed ' + files.length + ' file(s). Review them in Source Control and commit manually — nothing was committed or pushed.'
+                : 'Auggie run complete — no file changes detected.';
+            this.post({ type: 'streamEvent', event: { type: 'finish', success: true, files, summary } });
+        } catch (error: any) {
+            this.post({ type: 'streamEvent', event: { type: 'error', error: error?.message || String(error) } });
+        } finally {
+            this.post({ type: 'streamRunDone' });
+        }
+    }
+
+    /**
+     * Flip the agent backend (Neo \u2194 Auggie) from the command palette and
+     * refresh the settings overlay. Reuses handleSetBackend so behavior matches
+     * the in-chat toggle exactly.
+     */
+    public async toggleBackend() {
+        const current = vscode.workspace
+            .getConfiguration('agentNeo')
+            .get<string>('agentBackend', 'neo');
+        await this.handleSetBackend(current === 'auggie' ? 'neo' : 'auggie');
+    }
+
+    /**
+     * Stop the active Auggie subprocess (command palette / Stop button).
+     */
+    public stopAuggie() {
+        if (this.auggie.isRunning()) {
+            this.auggie.stop();
+            this.post({ type: 'streamEvent', event: { type: 'error', error: 'Auggie session stopped.' } });
+            this.post({ type: 'streamRunDone' });
+            vscode.window.showInformationMessage('Auggie session stopped.');
+        } else {
+            vscode.window.showInformationMessage('No Auggie session is running.');
         }
     }
 
@@ -2960,6 +3069,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
             type: 'settingsInfo',
             apiUrl: config.get('apiUrl', 'http://127.0.0.1:8000'),
             tokenSet: !!config.get('apiToken', ''),
+            agentBackend: config.get('agentBackend', 'neo'),
             healthy,
             guidelineFiles,
             workspace: folder?.name ?? null,

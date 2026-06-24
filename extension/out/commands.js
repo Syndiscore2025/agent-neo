@@ -156,5 +156,13 @@ function registerCommands(context, chatPanel, statusBar, storage, repoManager, i
     context.subscriptions.push(vscode.commands.registerCommand('agent-neo.manageCliTools', async () => {
         await integrationsManager.manageCliTools();
     }));
+    // Toggle the agent backend (Neo HTTP API ↔ local Auggie CLI)
+    context.subscriptions.push(vscode.commands.registerCommand('agent-neo.toggleBackend', async () => {
+        await chatPanel.toggleBackend();
+    }));
+    // Stop the active Auggie subprocess
+    context.subscriptions.push(vscode.commands.registerCommand('agent-neo.stopAuggie', () => {
+        chatPanel.stopAuggie();
+    }));
 }
 //# sourceMappingURL=commands.js.map
