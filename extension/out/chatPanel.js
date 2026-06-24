@@ -2780,7 +2780,7 @@ class ChatPanel {
             return;
         }
         try {
-            await this.auggie.run(task, folder.uri.fsPath, (ev) => {
+            const ok = await this.auggie.run(task, folder.uri.fsPath, (ev) => {
                 this.post({ type: 'streamEvent', event: ev });
             });
             // Post-run: surface changed files (no auto-commit / no push).
@@ -2790,10 +2790,18 @@ class ChatPanel {
                 ...(repo?.state?.indexChanges ?? []),
             ];
             const files = changes.map((c) => ({ path: vscode.workspace.asRelativePath(c.uri) }));
-            const summary = files.length
-                ? 'Auggie changed ' + files.length + ' file(s). Review them in Source Control and commit manually — nothing was committed or pushed.'
-                : 'Auggie run complete — no file changes detected.';
-            this.post({ type: 'streamEvent', event: { type: 'finish', success: true, files, summary } });
+            if (ok) {
+                const summary = files.length
+                    ? 'Auggie changed ' + files.length + ' file(s). Review them in Source Control and commit manually — nothing was committed or pushed.'
+                    : 'Auggie run complete — no file changes detected.';
+                this.post({ type: 'streamEvent', event: { type: 'finish', success: true, files, summary } });
+            }
+            else if (files.length) {
+                // Run failed, but it left edits behind — flag them without masking
+                // the error card the runner already emitted with the real reason.
+                this.post({ type: 'streamEvent', event: { type: 'finish', success: false, files, summary: 'Auggie run failed — see the error above. It left ' + files.length + ' uncommitted file change(s) to review.' } });
+            }
+            // On failure with no files, the runner's error event stands alone.
         }
         catch (error) {
             this.post({ type: 'streamEvent', event: { type: 'error', error: error?.message || String(error) } });

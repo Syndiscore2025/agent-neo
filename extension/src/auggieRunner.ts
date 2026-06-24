@@ -41,11 +41,11 @@ export class AuggieRunner {
         task: string,
         cwd: string,
         onEvent: (ev: AuggieEvent) => void
-    ): Promise<void> {
+    ): Promise<boolean> {
         return new Promise((resolve) => {
             if (this.proc) {
                 onEvent({ type: 'error', error: 'An Auggie session is already running. Stop it first.' });
-                resolve();
+                resolve(false);
                 return;
             }
 
@@ -53,17 +53,24 @@ export class AuggieRunner {
                 .getConfiguration('agentNeo')
                 .get<string>('auggiePath', 'auggie');
 
+            // On Windows we spawn through a shell (to resolve the auggie.cmd /
+            // auggie.ps1 shims), which makes cmd.exe re-split the argument list
+            // on whitespace. Quote the task so the whole prompt arrives as ONE
+            // argument — Auggie's --print expects exactly one. Elsewhere there's
+            // no shell, so the raw task is passed through untouched.
+            const useShell = process.platform === 'win32';
+            const taskArg = useShell ? '"' + task.replace(/"/g, '""') + '"' : task;
+
             let proc: ChildProcess;
             try {
-                proc = spawn(cmd, ['--print', task], {
+                proc = spawn(cmd, ['--print', taskArg], {
                     cwd,
-                    // Resolve .cmd / .ps1 shims on Windows and PATH lookups everywhere.
-                    shell: process.platform === 'win32',
+                    shell: useShell,
                     env: process.env,
                 });
             } catch (err: any) {
                 onEvent({ type: 'error', error: 'Failed to launch Auggie: ' + (err?.message || String(err)) });
-                resolve();
+                resolve(false);
                 return;
             }
 
@@ -86,7 +93,7 @@ export class AuggieRunner {
                     : 'Auggie process error: ' + (err?.message || String(err));
                 onEvent({ type: 'error', error: msg });
                 this.proc = null;
-                resolve();
+                resolve(false);
             });
 
             proc.on('close', (code) => {
@@ -102,7 +109,7 @@ export class AuggieRunner {
                         error: 'Auggie exited with code ' + code + hint + (detail ? '\n' + detail : ''),
                     });
                 }
-                resolve();
+                resolve(code === 0);
             });
         });
     }

@@ -2,7 +2,7 @@
   "name": "agent-neo-vscode",
   "displayName": "Agent NEO",
   "description": "Interactive coding partner powered by Agent NEO",
-  "version": "2.3.0",
+  "version": "2.3.1",
   "publisher": "agent-neo",
   "engines": {
     "vscode": "^1.85.0"
@@ -142,7 +142,10 @@
         },
         "agentNeo.agentBackend": {
           "type": "string",
-          "enum": ["neo", "auggie"],
+          "enum": [
+            "neo",
+            "auggie"
+          ],
           "enumDescriptions": [
             "Use the Agent NEO backend (HTTP API at agentNeo.apiUrl)",
             "Use the Auggie CLI as a local subprocess (requires 'auggie' installed and 'auggie login')"
@@ -178,4 +181,3 @@
     "marked": "^11.0.0"
   }
 }
-
