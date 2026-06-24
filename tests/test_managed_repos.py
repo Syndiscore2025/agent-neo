@@ -214,7 +214,8 @@ class TestRunHistory:
         rec = RunRecorder(reg, task="do it", repo_path=str(data_dir), model="gpt-4o")
         rec.observe({"type": "tool_end", "path": "a.py"})
         rec.observe({"type": "tool_end", "path": "a.py"})  # deduped
-        rec.observe({"type": "commit", "commit_sha": "abc123"})
+        rec.observe({"type": "commit", "commit_sha": "abc123",
+                     "pre_run_ref": "def456"})
         rec.finalize()
         rec.finalize()  # idempotent
 
@@ -222,6 +223,7 @@ class TestRunHistory:
         assert len(runs) == 1
         assert runs[0]["status"] == "committed"
         assert runs[0]["commit"] == "abc123"
+        assert runs[0]["pre_run_ref"] == "def456"
         assert runs[0]["files"] == ["a.py"]
         assert runs[0]["model"] == "gpt-4o"
         assert runs[0]["finished_at"] is not None

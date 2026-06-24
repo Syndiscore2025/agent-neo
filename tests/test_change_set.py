@@ -130,6 +130,8 @@ def test_gated_commit_stages_only_change_set_paths(monkeypatch, tmp_path):
     assert card is not None
     assert card.status == "Working"
     assert card.files_changed == ["a.txt"]
+    # pre-run snapshot captured (HEAD read before the commit) for run rollback
+    assert card.pre_run_ref == "abc1234"
 
 
 def test_gated_commit_blocks_invalid_change_without_touching_git(monkeypatch, tmp_path):

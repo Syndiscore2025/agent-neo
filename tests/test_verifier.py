@@ -3,6 +3,7 @@ Tests for the Phase C verifier: system-controlled verification + bounded repair.
 """
 
 import asyncio
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -109,6 +110,68 @@ class TestRunChecks:
         result = v_mod.Verifier(str(tmp_path)).run_checks(cs)
         assert result.passed is True
         assert result.checks_run == ["(auto-detected test command)"]
+
+
+class TestSyntaxCheckFallback:
+    """No project tests → broken code is still caught (and thus auto-reverted)."""
+
+    def test_broken_python_fails(self, tmp_path):
+        (tmp_path / "broken.py").write_text("def f(:\n", encoding="utf-8")
+        cs = ChangeSet()
+        cs.record("broken.py", "", "def f(:\n", existed_before=False)
+        result = _v_mod().Verifier(str(tmp_path))._syntax_check(cs)
+        assert result.passed is False
+        assert "syntax: python (py_compile)" in result.checks_run
+        assert result.failure_summary
+
+    def test_valid_python_passes(self, tmp_path):
+        (tmp_path / "ok.py").write_text("x = 1\n", encoding="utf-8")
+        cs = ChangeSet()
+        cs.record("ok.py", "", "x = 1\n", existed_before=False)
+        result = _v_mod().Verifier(str(tmp_path))._syntax_check(cs)
+        assert result.passed is True
+        assert "syntax: python (py_compile)" in result.checks_run
+
+    def test_broken_json_fails(self, tmp_path):
+        (tmp_path / "data.json").write_text("{bad json", encoding="utf-8")
+        cs = ChangeSet()
+        cs.record("data.json", "", "{bad json", existed_before=False)
+        result = _v_mod().Verifier(str(tmp_path))._syntax_check(cs)
+        assert result.passed is False
+        assert "syntax: json" in result.checks_run
+
+    def test_unsupported_file_is_safe_pass(self, tmp_path):
+        (tmp_path / "notes.txt").write_text("hello\n", encoding="utf-8")
+        cs = ChangeSet()
+        cs.record("notes.txt", "", "hello\n", existed_before=False)
+        result = _v_mod().Verifier(str(tmp_path))._syntax_check(cs)
+        assert result.passed is True
+        assert result.checks_run == []
+
+    def test_deleted_file_is_not_checked(self, tmp_path):
+        # A deleted .py must not be syntax-checked (it's gone from disk).
+        cs = ChangeSet()
+        cs.record_delete("gone.py", "def f(:\n")
+        result = _v_mod().Verifier(str(tmp_path))._syntax_check(cs)
+        assert result.passed is True
+        assert result.checks_run == []
+
+    def test_run_checks_routes_to_syntax_when_no_tests(self, tmp_path, monkeypatch):
+        v_mod = _v_mod()
+
+        def fake_run_tests(repo_path, test_command=None, timeout=300):
+            return TestResult(
+                passed=False, output="No test command configured",
+                duration_seconds=0.0,
+            )
+
+        monkeypatch.setattr(v_mod, "run_tests", fake_run_tests)
+        (tmp_path / "broken.py").write_text("def f(:\n", encoding="utf-8")
+        cs = ChangeSet()
+        cs.record("broken.py", "", "def f(:\n", existed_before=False)
+        result = v_mod.Verifier(str(tmp_path)).run_checks(cs)
+        assert result.passed is False
+        assert "syntax: python (py_compile)" in result.checks_run
 
 
 class TestSummarizeFailure:
@@ -503,6 +566,104 @@ class TestAutoRunVerification:
         halted = next(e for e in events if e["type"] == "run_halted")
         assert halted["reverted"] is True
         assert (tmp_path / "mod.py").read_text() == "ok\n"
+
+
+# ── Per-run rollback to pre-run ref ────────────────────────────────────────────
+
+def _git(args, cwd):
+    subprocess.run(["git", *args], cwd=cwd, check=True,
+                   capture_output=True, text=True)
+
+
+def _init_repo(path):
+    _git(["init"], path)
+    _git(["config", "user.email", "t@example.com"], path)
+    _git(["config", "user.name", "Test"], path)
+    _git(["config", "commit.gpgsign", "false"], path)
+
+
+def _head(path, short=False):
+    cmd = ["rev-parse", "--short", "HEAD"] if short else ["rev-parse", "HEAD"]
+    return subprocess.run(["git", *cmd], cwd=path, check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+class _RollbackSessions:
+    """SessionManager stand-in returning a fixed last execution card."""
+    def __init__(self, card):
+        self._card = card
+        self.set_calls = []
+
+    def get_last_execution(self, sid):
+        return self._card
+
+    def set_last_execution(self, sid, card):
+        self.set_calls.append(card)
+
+
+def _rollback_orch(repo_path, card):
+    from app.interactive.orchestrator import InteractiveOrchestrator
+    orch = InteractiveOrchestrator.__new__(InteractiveOrchestrator)
+    orch.engine = SimpleNamespace(repo_path=repo_path)
+    orch.session_manager = _RollbackSessions(card)
+    return orch
+
+
+def _committed_run(tmp_path):
+    """Init a repo, commit 'original', then a run commit 'broken'."""
+    repo = str(tmp_path)
+    _init_repo(repo)
+    (tmp_path / "a.txt").write_text("original\n", encoding="utf-8")
+    _git(["add", "a.txt"], repo)
+    _git(["commit", "-m", "init"], repo)
+    pre = _head(repo)
+    (tmp_path / "a.txt").write_text("broken\n", encoding="utf-8")
+    _git(["add", "a.txt"], repo)
+    _git(["commit", "-m", "run"], repo)
+    return repo, pre, _head(repo, short=True)
+
+
+class TestPerRunRollback:
+    def test_restores_run_to_pre_run_ref(self, tmp_path):
+        from app.interactive.contracts import ExecutionResultCard, RollbackRequest
+        repo, pre, sha = _committed_run(tmp_path)
+        card = ExecutionResultCard(
+            status="Working", mode="CRITICAL", commit_sha=sha, pre_run_ref=pre
+        )
+        orch = _rollback_orch(repo, card)
+
+        resp = asyncio.run(orch.handle_rollback(RollbackRequest(session_id="s1")))
+
+        assert resp.success is True
+        assert resp.restored_to == pre
+        assert resp.commit_reverted == sha
+        assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "original\n"
+        # last execution cleared so a second rollback is blocked
+        assert orch.session_manager.set_calls[-1].commit_sha is None
+
+    def test_fallback_reverts_single_commit_without_pre_run_ref(self, tmp_path):
+        from app.interactive.contracts import ExecutionResultCard, RollbackRequest
+        repo, _pre, sha = _committed_run(tmp_path)
+        card = ExecutionResultCard(
+            status="Working", mode="CRITICAL", commit_sha=sha, pre_run_ref=None
+        )
+        orch = _rollback_orch(repo, card)
+
+        resp = asyncio.run(orch.handle_rollback(RollbackRequest(session_id="s1")))
+
+        assert resp.success is True
+        assert resp.restored_to is None
+        assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "original\n"
+
+    def test_no_commit_sha_fails(self, tmp_path):
+        from app.interactive.contracts import ExecutionResultCard, RollbackRequest
+        card = ExecutionResultCard(status="Working", mode="CRITICAL", commit_sha=None)
+        orch = _rollback_orch(str(tmp_path), card)
+
+        resp = asyncio.run(orch.handle_rollback(RollbackRequest(session_id="s1")))
+
+        assert resp.success is False
+        assert "commit SHA" in resp.message
 
 
 

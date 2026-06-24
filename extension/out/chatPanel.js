@@ -2617,7 +2617,8 @@ class ChatPanel {
         if (!this.sessionId) {
             return;
         }
-        const confirm = await vscode.window.showWarningMessage('This will run git revert on the last applied commit (local only, no push). Continue?', 'Yes, roll back', 'Cancel');
+        const confirm = await vscode.window.showWarningMessage('This will roll back the last run to its pre-run state via git revert '
+            + '(local only, no push). Continue?', 'Yes, roll back', 'Cancel');
         if (confirm !== 'Yes, roll back') {
             return;
         }

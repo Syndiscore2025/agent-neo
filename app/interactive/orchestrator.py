@@ -487,8 +487,12 @@ class InteractiveOrchestrator:
     # ------------------------------------------------------------------
     async def handle_rollback(self, request: RollbackRequest) -> RollbackResponse:
         """
-        Revert the last committed change using ``git revert --no-edit``.
-        The revert is committed locally; it is never pushed automatically.
+        Roll back the last committed run with ``git revert --no-edit``.
+
+        When the run's pre-run ref was captured, the entire run (the range
+        ``pre_run_ref..commit_sha``) is reverted so the working tree returns to
+        its pre-run state; otherwise we fall back to reverting just the run's
+        commit. Revert commits are created locally only — never pushed.
         """
         last = self.session_manager.get_last_execution(request.session_id)
         if not last:
@@ -506,10 +510,15 @@ class InteractiveOrchestrator:
                 message="Previous execution did not produce a commit SHA — cannot roll back.",
             )
 
+        pre_run_ref = getattr(last, "pre_run_ref", None)
+        # Revert the whole run when we have its pre-run snapshot, else just the
+        # one commit. A range target restores the working tree to pre_run_ref.
+        target = f"{pre_run_ref}..{commit_sha}" if pre_run_ref else commit_sha
+
         repo_path = getattr(self.engine, "repo_path", None)
         try:
             result = subprocess.run(
-                ["git", "revert", "--no-edit", commit_sha],
+                ["git", "revert", "--no-edit", target],
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
@@ -518,7 +527,7 @@ class InteractiveOrchestrator:
             if result.returncode == 0:
                 logger.info(
                     f"Rollback succeeded for session {request.session_id}: "
-                    f"reverted {commit_sha[:8]}"
+                    f"reverted {target}"
                 )
                 # Clear the stored execution so double-rollback is blocked
                 self.session_manager.set_last_execution(
@@ -528,13 +537,29 @@ class InteractiveOrchestrator:
                         error=None, commit_sha=None
                     ),
                 )
+                if pre_run_ref:
+                    msg = (
+                        f"✓ Rolled back this run to pre-run state "
+                        f"{pre_run_ref[:8]} (local revert commit created)."
+                    )
+                else:
+                    msg = (
+                        f"✓ Rolled back commit {commit_sha[:8]} successfully "
+                        f"(local revert commit created)."
+                    )
                 return RollbackResponse(
                     session_id=request.session_id,
                     success=True,
-                    message=f"✓ Rolled back commit {commit_sha[:8]} successfully (local revert commit created).",
+                    message=msg,
                     commit_reverted=commit_sha,
+                    restored_to=pre_run_ref,
                 )
             else:
+                # Leave the repo clean if the revert hit conflicts.
+                subprocess.run(
+                    ["git", "revert", "--abort"],
+                    cwd=repo_path, capture_output=True, text=True, timeout=30,
+                )
                 err = result.stderr.strip() or result.stdout.strip()
                 logger.error(f"git revert failed for session {request.session_id}: {err}")
                 return RollbackResponse(
@@ -542,6 +567,7 @@ class InteractiveOrchestrator:
                     success=False,
                     message=f"✗ git revert failed: {err}",
                     commit_reverted=commit_sha,
+                    restored_to=pre_run_ref,
                 )
         except Exception as exc:
             logger.error(f"Rollback exception for session {request.session_id}: {exc}", exc_info=True)
@@ -789,6 +815,7 @@ class InteractiveOrchestrator:
                     yield {
                         "type": "commit",
                         "sha": card.commit_sha,
+                        "pre_run_ref": card.pre_run_ref,
                         "files": change_set.paths,
                     }
         else:
@@ -984,6 +1011,10 @@ class InteractiveOrchestrator:
             logger.warning(f"ChangeSet blocked for session {session_id}: {gate.errors}")
             return card
 
+        # Snapshot HEAD before we commit so this exact run can be rolled back
+        # to its pre-run state later, even when no tests gate it.
+        pre_run_ref = _git_head_sha(repo_path)
+
         try:
             subprocess.run(["git", "add", "--", *change_set.paths],
                            cwd=repo_path, check=True, capture_output=True, timeout=15)
@@ -1001,6 +1032,7 @@ class InteractiveOrchestrator:
                 card = ExecutionResultCard(
                     status="Working", mode="CRITICAL",
                     commit_sha=sha,
+                    pre_run_ref=pre_run_ref,
                     files_changed=change_set.paths,
                     lines_changed=gate.lines_changed,
                     validation_passed=True,
@@ -1014,6 +1046,22 @@ class InteractiveOrchestrator:
         except Exception as exc:
             logger.warning(f"Could not commit agent changes: {exc}")
         return None
+
+
+def _git_head_sha(repo_path: Optional[str]) -> Optional[str]:
+    """Current HEAD commit sha, or None if not a repo / no commits yet."""
+    if not repo_path:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_path, capture_output=True, text=True, timeout=15,
+        )
+        if proc.returncode == 0:
+            return proc.stdout.strip()
+    except Exception as exc:
+        logger.warning(f"Could not read git HEAD: {exc}")
+    return None
 
 
 # Global orchestrator instance

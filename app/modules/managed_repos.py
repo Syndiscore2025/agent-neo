@@ -318,6 +318,7 @@ class RunRecorder:
             "status": "interrupted",
             "files": [],
             "commit": None,
+            "pre_run_ref": None,
             "error": None,
             "started_at": _now(),
             "finished_at": None,
@@ -334,6 +335,7 @@ class RunRecorder:
             elif etype == "commit":
                 self._summary["status"] = "committed"
                 self._summary["commit"] = event.get("commit_sha") or event.get("sha")
+                self._summary["pre_run_ref"] = event.get("pre_run_ref")
             elif etype == "phased_done":
                 if self._summary["status"] != "committed":
                     self._summary["status"] = "completed"

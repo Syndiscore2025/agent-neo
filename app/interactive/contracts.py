@@ -16,6 +16,7 @@ class ExecutionResultCard(BaseModel):
     status: str                                          # "Working" | "Broken"
     mode: str                                            # "CRITICAL" | "RAPID"
     commit_sha: Optional[str] = None
+    pre_run_ref: Optional[str] = None                    # HEAD before this run's commit
     files_changed: List[str] = Field(default_factory=list)
     lines_changed: int = 0
     pushed: bool = False
@@ -192,6 +193,7 @@ class RollbackResponse(BaseModel):
     success: bool
     message: str
     commit_reverted: Optional[str] = None
+    restored_to: Optional[str] = None   # pre-run ref the run was rolled back to
 
 
 # ---------------------------------------------------------------------------

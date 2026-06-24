@@ -13,8 +13,12 @@ merging repair edits back into the run's ChangeSet so the existing
 gate/revert pipeline sees the full picture.
 """
 
+import json
 import logging
 import os
+import shutil
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncGenerator, List, Optional
@@ -29,6 +33,11 @@ MAX_REPAIR_ATTEMPTS = int(os.getenv("NEO_MAX_REPAIR_ATTEMPTS", "2"))
 
 _FAILURE_SUMMARY_LIMIT = 1500
 _NO_CHECKS_MESSAGE = "No test command configured"
+
+# Syntax-check fallback (used when no project tests are detected) — bounds so
+# a large run can't spawn an unbounded number of checks or hang verification.
+_SYNTAX_CHECK_FILE_CAP = 60
+_SYNTAX_CHECK_TIMEOUT = 60
 
 
 @dataclass
@@ -129,8 +138,11 @@ class Verifier:
 
         result = run_tests(self.repo_path, test_command=command)
         if command is None and _NO_CHECKS_MESSAGE in result.output:
-            # Nothing detectable to run — safe default, recorded as no checks.
-            return CheckResult(passed=True, checks_run=[], failure_summary="")
+            # No project tests detected. Fall back to a language-aware syntax/
+            # compile check over the changed files so syntactically broken code
+            # is still caught (and auto-reverted) instead of committed with no
+            # safety net at all.
+            return self._syntax_check(change_set)
 
         ran = command or "(auto-detected test command)"
         if result.passed:
@@ -140,6 +152,86 @@ class Verifier:
             checks_run=[ran],
             failure_summary=_summarize_failure(result.output),
         )
+
+    # ── syntax-check fallback (no tests detected) ─────────────────────────
+
+    def _changed_existing_files(self, change_set: ChangeSet) -> List[str]:
+        """Changed, non-deleted paths that still exist on disk (capped)."""
+        root = Path(self.repo_path)
+        files: List[str] = []
+        for e in change_set.edits:
+            if e.operation == "delete":
+                continue
+            if (root / e.path).is_file():
+                files.append(e.path)
+            if len(files) >= _SYNTAX_CHECK_FILE_CAP:
+                break
+        return files
+
+    def _syntax_check(self, change_set: Optional[ChangeSet]) -> CheckResult:
+        """Catch obviously broken (syntax/parse-error) code when no project
+        tests exist, so the run is auto-reverted rather than committed blind.
+
+        Conservative by design: only real parse errors fail. Missing tools or
+        unsupported languages are skipped, never failed — a clean change is
+        never reverted just because we couldn't check it.
+        """
+        if not change_set:
+            return CheckResult(passed=True, checks_run=[], failure_summary="")
+
+        root = Path(self.repo_path)
+        files = self._changed_existing_files(change_set)
+        py = [f for f in files if f.endswith(".py")]
+        node = [f for f in files if f.endswith((".js", ".mjs", ".cjs"))]
+        jsons = [f for f in files if f.endswith(".json")]
+
+        checks_run: List[str] = []
+        failures: List[str] = []
+
+        if py:
+            checks_run.append("syntax: python (py_compile)")
+            try:
+                proc = subprocess.run(
+                    [sys.executable, "-m", "py_compile", *py],
+                    cwd=str(root), capture_output=True, text=True,
+                    timeout=_SYNTAX_CHECK_TIMEOUT,
+                )
+                if proc.returncode != 0:
+                    failures.append((proc.stderr or proc.stdout).strip())
+            except Exception as exc:  # tool/timeout problem → skip, never fail
+                logger.warning(f"py_compile syntax check skipped: {exc}")
+
+        if node and shutil.which("node"):
+            checks_run.append("syntax: javascript (node --check)")
+            for f in node:
+                try:
+                    proc = subprocess.run(
+                        ["node", "--check", f],
+                        cwd=str(root), capture_output=True, text=True,
+                        timeout=_SYNTAX_CHECK_TIMEOUT,
+                    )
+                    if proc.returncode != 0:
+                        failures.append((proc.stderr or proc.stdout).strip())
+                except Exception as exc:
+                    logger.warning(f"node --check skipped for {f}: {exc}")
+
+        if jsons:
+            checks_run.append("syntax: json")
+            for f in jsons:
+                try:
+                    json.loads((root / f).read_text(encoding="utf-8", errors="replace"))
+                except json.JSONDecodeError as exc:
+                    failures.append(f"{f}: {exc}")
+                except Exception as exc:
+                    logger.warning(f"json syntax check skipped for {f}: {exc}")
+
+        if failures:
+            return CheckResult(
+                passed=False,
+                checks_run=checks_run,
+                failure_summary=_summarize_failure("\n".join(failures)),
+            )
+        return CheckResult(passed=True, checks_run=checks_run, failure_summary="")
 
     # ── bounded repair loop ───────────────────────────────────────────────
 
