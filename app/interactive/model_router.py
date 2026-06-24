@@ -27,8 +27,8 @@ class ModelType(str, Enum):
 # surfaced in the picker via NEO_ANTHROPIC_MODELS / NEO_OPENAI_MODELS.
 MODEL_CATALOG: dict[str, dict] = {
     # Anthropic
-    "claude-sonnet": {"provider": "anthropic", "api_model": "claude-sonnet-4-20250514", "label": "Claude Sonnet 4"},
-    "claude-opus":   {"provider": "anthropic", "api_model": "claude-opus-4-20250514",   "label": "Claude Opus 4"},
+    "claude-sonnet": {"provider": "anthropic", "api_model": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6"},
+    "claude-opus":   {"provider": "anthropic", "api_model": "claude-opus-4-8",   "label": "Claude Opus 4.8"},
     # OpenAI ("gpt" alias resolves to OPENAI_MODEL env, default o1)
     "gpt":    {"provider": "openai", "api_model": None,     "label": "GPT (OPENAI_MODEL)"},
     "gpt-4o": {"provider": "openai", "api_model": "gpt-4o", "label": "GPT-4o"},
@@ -37,7 +37,7 @@ MODEL_CATALOG: dict[str, dict] = {
 }
 
 _OPENAI_PREFIXES = ("gpt", "o1", "o3", "o4", "chatgpt")
-_FALLBACK_MODEL = ("anthropic", "claude-sonnet-4-20250514")
+_FALLBACK_MODEL = ("anthropic", "claude-sonnet-4-6")
 
 
 def _extra_env_models() -> dict[str, dict]:

@@ -25,8 +25,8 @@ PRICING_SOURCE_URL = (
 
 # Bundled fallback (USD per million tokens) — used when no cache exists yet.
 FALLBACK_PRICING: dict[str, dict] = {
-    "claude-sonnet-4-20250514": {"input_per_mtok": 3.0, "output_per_mtok": 15.0},
-    "claude-opus-4-20250514": {"input_per_mtok": 15.0, "output_per_mtok": 75.0},
+    "claude-sonnet-4-6": {"input_per_mtok": 3.0, "output_per_mtok": 15.0},
+    "claude-opus-4-8": {"input_per_mtok": 5.0, "output_per_mtok": 25.0},
     "gpt-4o": {"input_per_mtok": 2.5, "output_per_mtok": 10.0},
     "o1": {"input_per_mtok": 15.0, "output_per_mtok": 60.0},
     "o3": {"input_per_mtok": 2.0, "output_per_mtok": 8.0},

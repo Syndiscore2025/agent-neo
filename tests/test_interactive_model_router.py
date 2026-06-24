@@ -120,8 +120,8 @@ class TestResolveModel:
     """Test wide-open model id resolution."""
 
     def test_catalog_aliases(self):
-        assert resolve_model("claude-sonnet") == ("anthropic", "claude-sonnet-4-20250514")
-        assert resolve_model("claude-opus") == ("anthropic", "claude-opus-4-20250514")
+        assert resolve_model("claude-sonnet") == ("anthropic", "claude-sonnet-4-6")
+        assert resolve_model("claude-opus") == ("anthropic", "claude-opus-4-8")
         assert resolve_model("gpt-4o") == ("openai", "gpt-4o")
 
     def test_gpt_alias_uses_openai_model_env(self, monkeypatch):
@@ -147,7 +147,7 @@ class TestResolveModel:
 
     def test_bad_default_falls_back_to_sonnet(self, monkeypatch):
         monkeypatch.setenv("DEFAULT_MODEL", "not-a-model")
-        assert resolve_model(None) == ("anthropic", "claude-sonnet-4-20250514")
+        assert resolve_model(None) == ("anthropic", "claude-sonnet-4-6")
 
     def test_env_extra_models_in_catalog(self, monkeypatch):
         monkeypatch.setenv("NEO_OPENAI_MODELS", "my-fine-tune-1")
@@ -210,7 +210,7 @@ class TestModelPricing:
 
     def test_fallback_pricing_when_no_cache(self):
         from app.interactive.model_pricing import get_pricing
-        price = get_pricing("claude-sonnet-4-20250514")
+        price = get_pricing("claude-sonnet-4-6")
         assert price == {"input_per_mtok": 3.0, "output_per_mtok": 15.0}
         assert get_pricing("unknown-model-xyz") is None
         assert get_pricing("") is None
@@ -278,11 +278,11 @@ class TestModelPricing:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
         model_pricing._cache = {"models": {"anthropic": [
             {"id": "claude-haiku-4-5", "label": "Claude Haiku 4.5"},
-            {"id": "claude-sonnet-4-20250514", "label": "dup of alias api_model"},
+            {"id": "claude-sonnet-4-6", "label": "dup of alias api_model"},
         ]}}
         router = ModelRouter()
         ids = router.get_available_models()
         assert "claude-haiku-4-5" in ids
         # discovered id matching an existing alias's api_model is not duplicated
-        assert "claude-sonnet-4-20250514" not in ids
+        assert "claude-sonnet-4-6" not in ids
 
