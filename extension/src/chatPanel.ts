@@ -260,6 +260,9 @@ export class ChatPanel implements vscode.WebviewViewProvider {
             case 'importTerminalOutput':
                 await this.importTerminalOutput();
                 break;
+            case 'setTerminalAgentEnabled':
+                await this.handleSetTerminalAgentEnabled(message.enabled);
+                break;
         }
     }
 
@@ -406,6 +409,22 @@ export class ChatPanel implements vscode.WebviewViewProvider {
             .update('agentBackend', value, vscode.ConfigurationTarget.Global);
         vscode.window.showInformationMessage(
             'Agent backend set to ' + (value === 'auggie' ? 'Auggie CLI (local)' : 'Neo backend') + '.'
+        );
+        await this.handleGetSettingsInfo();
+    }
+
+    /**
+     * Flip the Terminal Agent Orchestrator master toggle
+     * (agentNeo.terminalAgent.enabled) from the settings overlay so the user
+     * never has to edit VS Code settings by hand, then refresh the overlay.
+     */
+    private async handleSetTerminalAgentEnabled(enabled: boolean) {
+        const value = !!enabled;
+        await vscode.workspace
+            .getConfiguration('agentNeo')
+            .update('terminalAgent.enabled', value, vscode.ConfigurationTarget.Global);
+        vscode.window.showInformationMessage(
+            'Terminal Agent Orchestrator ' + (value ? 'enabled' : 'disabled') + '.'
         );
         await this.handleGetSettingsInfo();
     }
@@ -1569,6 +1588,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                         if (action === 'close') { settingsView.classList.remove('open'); scheduleSaveState(); }
                         else if (action === 'vscodeSettings') { vscode.postMessage({ type: 'openVSCodeSettings' }); }
                         else if (action === 'toggleBackend') { vscode.postMessage({ type: 'setBackend', backend: (lastSettingsInfo && lastSettingsInfo.agentBackend === 'auggie') ? 'neo' : 'auggie' }); }
+                        else if (action === 'toggleTerminalAgent') { vscode.postMessage({ type: 'setTerminalAgentEnabled', enabled: !(lastSettingsInfo && lastSettingsInfo.terminalAgentEnabled) }); }
                         else if (action === 'sendToTerminalAgent') { vscode.postMessage({ type: 'sendToTerminalAgent' }); }
                         else if (action === 'importTerminalOutput') { vscode.postMessage({ type: 'importTerminalOutput' }); }
                         else if (action === 'stopTerminalAgent') { vscode.postMessage({ type: 'stopTerminalAgent' }); }
@@ -1718,12 +1738,14 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                         h += '<div class="settings-section"><h3>Terminal Agent</h3>';
                         h += '<div class="settings-row"><span class="sr-key">Orchestrator</span>' +
                             (info.terminalAgentEnabled ? '<span class="settings-pill ok">enabled</span>' : '<span class="settings-pill err">disabled</span>') + '</div>';
+                        h += '<div class="settings-row"><button class="settings-btn" data-action="toggleTerminalAgent">' +
+                            (info.terminalAgentEnabled ? 'Disable orchestrator' : 'Enable orchestrator') + '</button></div>';
                         if (info.terminalAgentEnabled) {
                             h += '<div class="settings-row"><button class="settings-btn" data-action="sendToTerminalAgent">Send to Terminal Agent…</button></div>';
                             h += '<div class="settings-row"><button class="settings-btn" data-action="importTerminalOutput">Import / analyse pasted output…</button></div>';
                             h += '<div class="settings-row"><button class="settings-btn" data-action="stopTerminalAgent">Stop current run</button></div>';
                         } else {
-                            h += '<div class="settings-row"><span class="sr-key" style="opacity:.6;font-size:11px">Enable agentNeo.terminalAgent.enabled to orchestrate a terminal-based agent.</span></div>';
+                            h += '<div class="settings-row"><span class="sr-key" style="opacity:.6;font-size:11px">Click “Enable orchestrator” above to turn on terminal-agent orchestration.</span></div>';
                         }
                         const taRuns = info.terminalAgentHistory || [];
                         h += '<div class="settings-row"><span class="sr-key">Run history</span><span>' + taRuns.length + ' run(s)</span></div>';
