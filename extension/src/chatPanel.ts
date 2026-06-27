@@ -10,6 +10,15 @@ import { ApiClient } from './apiClient';
 import { NeoStorage } from './storage';
 import { IntegrationsManager } from './integrations';
 import { AuggieRunner } from './auggieRunner';
+import { OrchestratorController } from './terminalAgent/orchestratorController';
+import { readTerminalAgentSettings, isOrchestratorEnabled } from './terminalAgent/settings';
+import { SessionHistory } from './terminalAgent/history';
+import { gatherRunContext, getPostRunStatus } from './terminalAgent/contextGatherer';
+import { getProviderRegistry } from './terminalAgent/providers/registry';
+import { parseRun } from './terminalAgent/outputParser';
+import { detectDangerousCommands, redactSecrets } from './terminalAgent/safetyDetector';
+import { buildSuggestions } from './terminalAgent/suggestionEngine';
+import { ClaimVerification } from './terminalAgent/repoWatcher';
 
 export class ChatPanel implements vscode.WebviewViewProvider {
     public static readonly viewId = 'agent-neo.chatView';
@@ -23,6 +32,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
     private storage: NeoStorage;
     private integrations: IntegrationsManager;
     private auggie: AuggieRunner = new AuggieRunner();
+    private orchestrator: OrchestratorController | undefined;
     private sessionId: string | undefined;
     private selectedModel: string = ''; // empty → backend DEFAULT_MODEL
 
@@ -236,6 +246,19 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                 break;
             case 'refreshModels':
                 await this.handleRefreshModels();
+                break;
+            case 'sendToTerminalAgent':
+                await this.sendToTerminalAgent(message.task);
+                break;
+            case 'stopTerminalAgent':
+                this.stopTerminalAgent();
+                break;
+            case 'clearTerminalAgentHistory':
+                await this.clearTerminalAgentHistory();
+                await this.handleGetSettingsInfo();
+                break;
+            case 'importTerminalOutput':
+                await this.importTerminalOutput();
                 break;
         }
     }
@@ -877,6 +900,39 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                         opacity: 0.7;
                     }
 
+                    /* ── Terminal-agent post-run cards (suggestions / verify / safety) ── */
+                    .ta-card {
+                        margin-top: 8px;
+                        border: 1px solid var(--vscode-input-border, #333);
+                        border-radius: 6px;
+                        padding: 8px 10px;
+                        background: var(--vscode-editor-inactiveSelectionBackground);
+                    }
+                    .ta-card-title { font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+                    .ta-card.safety { border-left: 3px solid #e05252; }
+                    .ta-card.verify { border-left: 3px solid #4ec94e; }
+                    .ta-card.suggest { border-left: 3px solid var(--vscode-textLink-foreground, #3794ff); }
+                    .ta-suggest-btn {
+                        display: block;
+                        width: 100%;
+                        text-align: left;
+                        margin: 4px 0;
+                        padding: 6px 8px;
+                        border: 1px solid var(--vscode-input-border, #333);
+                        border-radius: 4px;
+                        background: var(--vscode-input-background);
+                        color: var(--vscode-foreground);
+                        cursor: pointer;
+                        font-size: 12px;
+                    }
+                    .ta-suggest-btn:hover { background: var(--vscode-list-hoverBackground); }
+                    .ta-suggest-btn .ta-hint { display: block; opacity: 0.6; font-size: 10px; margin-top: 2px; }
+                    .ta-line { font-size: 12px; margin: 2px 0; opacity: 0.9; }
+                    .ta-line.warn { color: var(--vscode-gitDecoration-modifiedResourceForeground, #d7ba7d); }
+                    .ta-line.bad { color: var(--vscode-gitDecoration-deletedResourceForeground, #f85149); }
+                    .ta-line.ok { color: var(--vscode-gitDecoration-addedResourceForeground, #2ea043); }
+                    .ta-mono { font-family: monospace; font-size: 11px; }
+
                     /* ── Pending attachment chips (in input area) ── */
                     #attachmentPreview {
                         display: flex;
@@ -1423,6 +1479,71 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                         });
                     }
 
+                    // Render the terminal-agent post-run cards into a run card body:
+                    // safety flags, claim verification, then prefill-on-click suggestions.
+                    function renderTerminalAgentCards(body, ev) {
+                        if (!body) { return; }
+                        const flags = ev.safetyFlags || [];
+                        if (flags.length) {
+                            let h = '<div class="ta-card-title">⚠️ Safety flags (' + flags.length + ')</div>';
+                            flags.forEach(f => {
+                                const cls = f.severity === 'danger' ? 'bad' : 'warn';
+                                h += '<div class="ta-line ' + cls + '">' + escapeHtml(f.rule || '') +
+                                    ' — ' + escapeHtml(f.detail || '') + '</div>';
+                            });
+                            const c = document.createElement('div');
+                            c.className = 'ta-card safety';
+                            c.innerHTML = h;
+                            body.appendChild(c);
+                        }
+
+                        const v = ev.verification;
+                        if (v) {
+                            let h = '<div class="ta-card-title">🔍 Claim verification</div>';
+                            (v.verified || []).forEach(p =>
+                                h += '<div class="ta-line ok">✓ verified: <span class="ta-mono">' + escapeHtml(p) + '</span></div>');
+                            (v.unverifiedClaims || []).forEach(p =>
+                                h += '<div class="ta-line warn">⚠ claimed but not found: <span class="ta-mono">' + escapeHtml(p) + '</span></div>');
+                            (v.unclaimedChanges || []).forEach(p =>
+                                h += '<div class="ta-line warn">＋ changed but not claimed: <span class="ta-mono">' + escapeHtml(p) + '</span></div>');
+                            (v.commitsCreated || []).forEach(s =>
+                                h += '<div class="ta-line">🔖 new commit: <span class="ta-mono">' + escapeHtml(String(s).slice(0, 72)) + '</span></div>');
+                            if ((v.verified || []).length || (v.unverifiedClaims || []).length ||
+                                (v.unclaimedChanges || []).length || (v.commitsCreated || []).length) {
+                                const c = document.createElement('div');
+                                c.className = 'ta-card verify';
+                                c.innerHTML = h;
+                                body.appendChild(c);
+                            }
+                        }
+
+                        const sugg = ev.suggestions || [];
+                        if (sugg.length) {
+                            const c = document.createElement('div');
+                            c.className = 'ta-card suggest';
+                            c.innerHTML = '<div class="ta-card-title">💡 Suggested next steps</div>';
+                            sugg.forEach(s => {
+                                const btn = document.createElement('button');
+                                btn.className = 'ta-suggest-btn';
+                                btn.innerHTML = escapeHtml(s.title || '') +
+                                    (s.prompt ? '<span class="ta-hint">Click to prefill the chat input (review before sending)</span>' : '');
+                                if (s.prompt) {
+                                    btn.addEventListener('click', () => {
+                                        // Prefill only — never auto-send (review-before-send rule).
+                                        messageInput.value = s.prompt;
+                                        autoGrow();
+                                        messageInput.focus();
+                                        scrollToBottom();
+                                    });
+                                } else {
+                                    btn.disabled = true;
+                                }
+                                c.appendChild(btn);
+                            });
+                            body.appendChild(c);
+                        }
+                    }
+
                     settingsBtn.addEventListener('click', () => {
                         settingsView.classList.add('open');
                         vscode.postMessage({ type: 'getSettingsInfo' });
@@ -1448,6 +1569,10 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                         if (action === 'close') { settingsView.classList.remove('open'); scheduleSaveState(); }
                         else if (action === 'vscodeSettings') { vscode.postMessage({ type: 'openVSCodeSettings' }); }
                         else if (action === 'toggleBackend') { vscode.postMessage({ type: 'setBackend', backend: (lastSettingsInfo && lastSettingsInfo.agentBackend === 'auggie') ? 'neo' : 'auggie' }); }
+                        else if (action === 'sendToTerminalAgent') { vscode.postMessage({ type: 'sendToTerminalAgent' }); }
+                        else if (action === 'importTerminalOutput') { vscode.postMessage({ type: 'importTerminalOutput' }); }
+                        else if (action === 'stopTerminalAgent') { vscode.postMessage({ type: 'stopTerminalAgent' }); }
+                        else if (action === 'clearTerminalAgentHistory') { vscode.postMessage({ type: 'clearTerminalAgentHistory' }); }
                         else if (action === 'neoTerminal') { vscode.postMessage({ type: 'openNeoTerminal' }); }
                         else if (action === 'openFile') { vscode.postMessage({ type: 'openFile', path: el.dataset.path }); }
                         else if (action === 'manageRepos') { vscode.postMessage({ type: 'manageRepos' }); }
@@ -1487,6 +1612,9 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                             (info.agentBackend === 'auggie' ? 'Auggie CLI (local)' : 'Neo backend') + '</span></div>';
                         h += '<div class="settings-row"><button class="settings-btn" data-action="toggleBackend">Switch to ' +
                             (info.agentBackend === 'auggie' ? 'Neo backend' : 'Auggie CLI') + '</button></div>';
+                        if (info.terminalAgentEnabled) {
+                            h += '<div class="settings-row"><button class="settings-btn" data-action="sendToTerminalAgent">Send to Terminal Agent…</button></div>';
+                        }
                         h += '<div class="settings-row"><button class="settings-btn" data-action="vscodeSettings">Open VS Code settings</button></div>';
                         h += '</div>';
 
@@ -1587,6 +1715,41 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                         sections.terminal = h;
                         h = '';
 
+                        h += '<div class="settings-section"><h3>Terminal Agent</h3>';
+                        h += '<div class="settings-row"><span class="sr-key">Orchestrator</span>' +
+                            (info.terminalAgentEnabled ? '<span class="settings-pill ok">enabled</span>' : '<span class="settings-pill err">disabled</span>') + '</div>';
+                        if (info.terminalAgentEnabled) {
+                            h += '<div class="settings-row"><button class="settings-btn" data-action="sendToTerminalAgent">Send to Terminal Agent…</button></div>';
+                            h += '<div class="settings-row"><button class="settings-btn" data-action="importTerminalOutput">Import / analyse pasted output…</button></div>';
+                            h += '<div class="settings-row"><button class="settings-btn" data-action="stopTerminalAgent">Stop current run</button></div>';
+                        } else {
+                            h += '<div class="settings-row"><span class="sr-key" style="opacity:.6;font-size:11px">Enable agentNeo.terminalAgent.enabled to orchestrate a terminal-based agent.</span></div>';
+                        }
+                        const taRuns = info.terminalAgentHistory || [];
+                        h += '<div class="settings-row"><span class="sr-key">Run history</span><span>' + taRuns.length + ' run(s)</span></div>';
+                        if (taRuns.length) {
+                            taRuns.slice(0, 20).forEach(r => {
+                                const icon = r.status === 'completed' ? '✅' : (r.status === 'failed' ? '❌' : (r.status === 'cancelled' ? '⏹️' : '•'));
+                                const when = r.started_at ? new Date(r.started_at).toLocaleString() : '';
+                                h += '<div class="settings-row"><span class="sr-key">' + icon + ' ' +
+                                    escapeHtml((r.request || '(task)').slice(0, 80)) + '</span></div>';
+                                const meta = [];
+                                if (r.provider_name) { meta.push(r.provider_name); }
+                                if (when) { meta.push(when); }
+                                meta.push(r.files + ' file(s)');
+                                if (r.commits) { meta.push(r.commits + ' commit(s)'); }
+                                if (r.tests_detected) { meta.push('tests ' + r.tests_passed + '/' + (r.tests_passed + r.tests_failed)); }
+                                if (r.safety_flags) { meta.push('⚠ ' + r.safety_flags + ' flag(s)'); }
+                                h += '<div class="settings-row"><span class="sr-key" style="opacity:.55;font-size:11px">' + escapeHtml(meta.join('  ·  ')) + '</span></div>';
+                            });
+                            h += '<div class="settings-row"><button class="settings-btn" data-action="clearTerminalAgentHistory">Clear run history</button></div>';
+                        } else {
+                            h += '<div class="settings-row"><span class="sr-key" style="opacity:.6;font-size:11px">Runs appear here after the orchestrator finishes a task.</span></div>';
+                        }
+                        h += '</div>';
+                        sections.terminalAgent = h;
+                        h = '';
+
                         h += '<div class="settings-section"><h3>Workspace</h3>';
                         h += '<div class="settings-row"><span class="sr-key">Folder</span><span>' + escapeHtml(info.workspace || '—') + '</span></div>';
                         h += '<div class="settings-row"><span class="sr-key">Path</span><span>' + escapeHtml(info.workspacePath || '—') + '</span></div>';
@@ -1602,7 +1765,7 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                         h += '</div>';
                         sections.account = h;
 
-                        const labels = { integrations: 'Integrations', repos: 'Repos', rules: 'Rules &amp; Guidelines', context: 'Context', terminal: 'Terminal', workspace: 'Workspace', account: 'Account &amp; Preferences' };
+                        const labels = { integrations: 'Integrations', repos: 'Repos', rules: 'Rules &amp; Guidelines', context: 'Context', terminal: 'Terminal', terminalAgent: 'Terminal Agent', workspace: 'Workspace', account: 'Account &amp; Preferences' };
                         if (!sections[settingsSection]) { settingsSection = 'integrations'; }
                         let tabs = '<div class="settings-tabs">';
                         Object.keys(labels).forEach(k => {
@@ -2424,6 +2587,10 @@ export class ChatPanel implements vscode.WebviewViewProvider {
                                     if (tokensEl && ev.summary) {
                                         tokensEl.textContent = ev.summary;
                                     }
+                                    // Terminal-agent post-run cards: safety → verify → suggestions.
+                                    const taCard = document.getElementById('streamRunCard') || messagesDiv;
+                                    const taBody = taCard.querySelector('.auto-run-card') || taCard;
+                                    renderTerminalAgentCards(taBody, ev);
                                     scrollToBottom();
                                 } else if (ev.type === 'commit') {
                                     trackFiles(ev.files);
@@ -2886,6 +3053,185 @@ export class ChatPanel implements vscode.WebviewViewProvider {
         }
     }
 
+    /** Read agentNeo.terminalAgent.* settings via the workspace configuration. */
+    private terminalAgentSettings() {
+        const cfg = vscode.workspace.getConfiguration('agentNeo');
+        return readTerminalAgentSettings(<T>(k: string, d: T) => cfg.get<T>(k, d));
+    }
+
+    /**
+     * Prompt Orchestrator entry point — gather context, build a structured
+     * prompt, let the user review/edit it, then launch the configured CLI agent
+     * and stream output into the run card. Gated on the orchestrator toggle.
+     */
+    public async sendToTerminalAgent(initial?: string) {
+        const settings = this.terminalAgentSettings();
+        if (!isOrchestratorEnabled(settings)) {
+            vscode.window.showWarningMessage(
+                'Terminal Agent Orchestrator is off. Enable "agentNeo.terminalAgent.enabled" first.',
+            );
+            return;
+        }
+        if (this.orchestrator?.isRunning()) {
+            vscode.window.showWarningMessage('A terminal-agent run is already in progress.');
+            return;
+        }
+        const folder = vscode.workspace.workspaceFolders?.[0];
+        const repoPath = settings.defaultWorkingDir || folder?.uri.fsPath;
+        if (!repoPath) {
+            vscode.window.showWarningMessage('Open a folder or set a default working directory first.');
+            return;
+        }
+        const userRequest = initial ?? await vscode.window.showInputBox({
+            prompt: 'Describe the task for the terminal agent',
+            ignoreFocusOut: true,
+        });
+        if (!userRequest || !userRequest.trim()) { return; }
+
+        this.show();
+        this.orchestrator = new OrchestratorController({
+            post: m => this.post(m),
+            settings,
+            history: new SessionHistory(this.context.globalState),
+            gatherContext: (rp, name) => gatherRunContext(rp, name),
+            getPostRunStatus: rp => getPostRunStatus(rp),
+            reviewPrompt: p => this._reviewPromptNative(p),
+        });
+        await this.orchestrator.start(userRequest.trim(), repoPath);
+    }
+
+    /**
+     * Open the generated prompt in an editor for review/edit, then ask
+     * Send / Copy / Cancel. Returns the (possibly edited) prompt, or undefined
+     * if the user cancels. No input is ever sent without this explicit Send.
+     */
+    private async _reviewPromptNative(prompt: string): Promise<string | undefined> {
+        const doc = await vscode.workspace.openTextDocument({ content: prompt, language: 'markdown' });
+        const editor = await vscode.window.showTextDocument(doc, { preview: false });
+        for (;;) {
+            const choice = await vscode.window.showInformationMessage(
+                'Review the generated prompt, then send it to the terminal agent?',
+                { modal: true },
+                'Send', 'Copy',
+            );
+            if (choice === 'Copy') {
+                await vscode.env.clipboard.writeText(editor.document.getText());
+                continue;
+            }
+            if (choice === 'Send') { return editor.document.getText(); }
+            return undefined;
+        }
+    }
+
+    /** Stop the active terminal-agent run, if any. */
+    public stopTerminalAgent() {
+        if (this.orchestrator?.isRunning()) {
+            this.orchestrator.stop();
+            vscode.window.showInformationMessage('Terminal-agent run stopped.');
+        } else {
+            vscode.window.showInformationMessage('No terminal-agent run is in progress.');
+        }
+    }
+
+    /** Clear the persisted terminal-agent run history (non-secret summaries). */
+    public async clearTerminalAgentHistory() {
+        const choice = await vscode.window.showWarningMessage(
+            'Clear all terminal-agent run history? This cannot be undone.',
+            { modal: true },
+            'Clear',
+        );
+        if (choice !== 'Clear') { return; }
+        await new SessionHistory(this.context.globalState).clear();
+        vscode.window.showInformationMessage('Terminal-agent run history cleared.');
+    }
+
+    /**
+     * Observer paste-import: let the user paste terminal output from any agent,
+     * then run the same analysis pipeline (parse → safety → suggestions) and
+     * render the post-run cards. No git claim verification is performed for an
+     * import, so that card is omitted. Output is redacted before analysis.
+     */
+    public async importTerminalOutput() {
+        const settings = this.terminalAgentSettings();
+        if (!isOrchestratorEnabled(settings)) {
+            vscode.window.showWarningMessage(
+                'Terminal Agent Orchestrator is off. Enable "agentNeo.terminalAgent.enabled" first.',
+            );
+            return;
+        }
+        const doc = await vscode.workspace.openTextDocument({
+            content:
+                '# Paste terminal-agent output below this line, then run\n' +
+                '# "Agent NEO: Analyze Pasted Output" again to confirm.\n',
+            language: 'plaintext',
+        });
+        await vscode.window.showTextDocument(doc, { preview: false });
+        const choice = await vscode.window.showInformationMessage(
+            'Paste the terminal output into the open editor, then click Analyze.',
+            { modal: true },
+            'Analyze',
+        );
+        if (choice !== 'Analyze') { return; }
+
+        const raw = redactSecrets(doc.getText());
+        if (!raw.trim()) {
+            vscode.window.showWarningMessage('No output to analyze.');
+            return;
+        }
+        const provider =
+            getProviderRegistry().get(settings.defaultProvider) ??
+            getProviderRegistry().list()[0];
+        if (!provider) {
+            vscode.window.showWarningMessage('No terminal-agent provider is registered.');
+            return;
+        }
+
+        const parsed = parseRun(provider, raw);
+        const safetyFlags = detectDangerousCommands(raw);
+        // No working-tree diff for an import — claims are informational only.
+        const verification: ClaimVerification = {
+            claimedFiles: parsed.claimedFiles,
+            actuallyChanged: [],
+            verified: [],
+            unverifiedClaims: [],
+            unclaimedChanges: [],
+            claimedCommit: parsed.claimedCommit,
+            commitsCreated: [],
+            commitClaimConsistent: true,
+        };
+        const suggestions = buildSuggestions({
+            status: parsed.completed ? 'completed' : 'failed',
+            parsed,
+            verification,
+            changedFiles: parsed.claimedFiles,
+            branchChanged: false,
+            commitsCreated: [],
+            safetyFlags,
+            userRequest: '(imported output)',
+        });
+
+        this.show();
+        const tests = parsed.tests;
+        const summary =
+            `Imported output analysed. ${parsed.claimedFiles.length} claimed file(s)` +
+            (tests.detected ? `, tests ${tests.passed} passed / ${tests.failed} failed` : '') +
+            (parsed.errors.length ? `, ${parsed.errors.length} error(s)` : '') + '.';
+        this.post({ type: 'streamRunStart', task: 'Imported terminal output', preRunRef: null });
+        this.post({
+            type: 'streamEvent',
+            event: {
+                type: 'finish',
+                success: parsed.completed && !parsed.errors.length,
+                files: parsed.claimedFiles.map(p => ({ path: p })),
+                summary,
+                suggestions,
+                tests,
+                safetyFlags,
+            },
+        });
+        this.post({ type: 'streamRunDone' });
+    }
+
     /**
      * Open a file written by the agent in the VS Code editor.
      * path is repo-relative; resolved against the current workspace root.
@@ -3089,11 +3435,29 @@ export class ChatPanel implements vscode.WebviewViewProvider {
             // backend unreachable — Integrations tab shows an empty state
         }
 
+        // Terminal-agent run history (non-secret summaries) for the settings panel.
+        const taHistory = new SessionHistory(this.context.globalState).list().map(s => ({
+            session_id: s.session_id,
+            provider_name: s.provider_name,
+            request: s.original_user_request,
+            status: s.status,
+            started_at: s.started_at,
+            files: s.changed_files.length,
+            commits: s.commits_created.length,
+            tests_detected: s.tests_detected,
+            tests_passed: s.tests_passed,
+            tests_failed: s.tests_failed,
+            suggestions: s.suggestions.length,
+            safety_flags: s.safety_flags.length,
+        }));
+
         this.post({
             type: 'settingsInfo',
             apiUrl: config.get('apiUrl', 'http://127.0.0.1:8000'),
             tokenSet: !!config.get('apiToken', ''),
             agentBackend: config.get('agentBackend', 'neo'),
+            terminalAgentEnabled: config.get('terminalAgent.enabled', false),
+            terminalAgentHistory: taHistory,
             healthy,
             guidelineFiles,
             workspace: folder?.name ?? null,

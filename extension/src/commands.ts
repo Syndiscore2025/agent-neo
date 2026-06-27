@@ -190,5 +190,19 @@ export function registerCommands(
             chatPanel.stopAuggie();
         })
     );
+
+    // Terminal Agent Orchestrator: build a structured prompt and run a CLI agent
+    context.subscriptions.push(
+        vscode.commands.registerCommand('agent-neo.sendToTerminalAgent', async () => {
+            await chatPanel.sendToTerminalAgent();
+        })
+    );
+
+    // Stop the active terminal-agent run
+    context.subscriptions.push(
+        vscode.commands.registerCommand('agent-neo.stopTerminalAgent', () => {
+            chatPanel.stopTerminalAgent();
+        })
+    );
 }
 

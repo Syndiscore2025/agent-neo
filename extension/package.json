@@ -73,6 +73,14 @@
       {
         "command": "agent-neo.stopAuggie",
         "title": "Agent NEO: Stop Auggie Session"
+      },
+      {
+        "command": "agent-neo.sendToTerminalAgent",
+        "title": "Agent NEO: Send to Terminal Agent"
+      },
+      {
+        "command": "agent-neo.stopTerminalAgent",
+        "title": "Agent NEO: Stop Terminal Agent Run"
       }
     ],
     "viewsContainers": {
@@ -157,6 +165,79 @@
           "type": "string",
           "default": "auggie",
           "description": "Path or command used to launch the Auggie CLI (defaults to 'auggie' on PATH)."
+        },
+        "agentNeo.terminalAgent.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable the Terminal Agent Orchestrator. When off, Neo behaves exactly as before."
+        },
+        "agentNeo.terminalAgent.defaultProvider": {
+          "type": "string",
+          "default": "augment-cli",
+          "description": "Default terminal-agent provider id. Augment CLI ships first; more providers register at runtime."
+        },
+        "agentNeo.terminalAgent.cliPath": {
+          "type": "string",
+          "default": "auggie",
+          "description": "Path or command used to launch the selected CLI agent (e.g. 'auggie', or a full path)."
+        },
+        "agentNeo.terminalAgent.defaultWorkingDir": {
+          "type": "string",
+          "default": "",
+          "description": "Default working directory / repo path for runs. Empty uses the first workspace folder."
+        },
+        "agentNeo.terminalAgent.promptTemplate": {
+          "type": "string",
+          "editPresentation": "multilineText",
+          "default": "",
+          "description": "Prompt template with {{variables}} (repo_path, current_branch, user_request, …). Empty uses the built-in default."
+        },
+        "agentNeo.terminalAgent.maxTimeoutSeconds": {
+          "type": "number",
+          "default": 1800,
+          "description": "Hard timeout for a run, in seconds. Set 0 to disable the timeout."
+        },
+        "agentNeo.terminalAgent.captureOutput": {
+          "type": "boolean",
+          "default": true,
+          "description": "Capture stdout/stderr from Neo-launched runs into the rolling buffer."
+        },
+        "agentNeo.terminalAgent.autoSaveSummaries": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically save a (secret-redacted) run summary to history when a run ends."
+        },
+        "agentNeo.terminalAgent.observer.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable Terminal Observer. Only active when the Terminal Agent Orchestrator is enabled."
+        },
+        "agentNeo.terminalAgent.observer.mode": {
+          "type": "string",
+          "enum": [
+            "neo-process",
+            "vscode-terminal",
+            "log-file",
+            "manual"
+          ],
+          "enumDescriptions": [
+            "Observe a process Neo launched (full stdout/stderr capture)",
+            "Best-effort read of the VS Code integrated terminal (limited by API)",
+            "Tail a terminal log file the CLI is configured to write",
+            "Manually paste / import the latest CLI output"
+          ],
+          "default": "neo-process",
+          "description": "How the Terminal Observer obtains CLI output."
+        },
+        "agentNeo.terminalAgent.observer.logFilePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a terminal log file to tail (used when observer.mode is 'log-file')."
+        },
+        "agentNeo.terminalAgent.confirmBeforeSendingInput": {
+          "type": "boolean",
+          "default": true,
+          "description": "Require explicit confirmation before Neo sends any input to a terminal session."
         }
       }
     }
@@ -165,7 +246,9 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "lint": "eslint src --ext ts"
+    "lint": "eslint src --ext ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
@@ -173,7 +256,8 @@
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
     "eslint": "^8.0.0",
-    "typescript": "^5.3.0"
+    "typescript": "^5.3.0",
+    "vitest": "^2.1.9"
   },
   "dependencies": {
     "@vscode/webview-ui-toolkit": "^1.4.0",
