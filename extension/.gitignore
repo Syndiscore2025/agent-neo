@@ -2,3 +2,7 @@ node_modules
 *.vsix
 .vscode-test
 
+# Compiled vitest config (generated from vitest.config.ts)
+vitest.config.js
+vitest.config.js.map
+
