@@ -16,8 +16,10 @@ from app.modules.repo_context import (
 )
 from app.interactive.contracts import (
     ChatContext,
+    CommitInfo,
     ContextPack,
     FileContext,
+    GitHistory,
     ServiceGraph,
     ServiceNode,
 )
@@ -201,12 +203,18 @@ class ContextEngine:
         if service_graph and service_graph.summary:
             summary += f" — stack: {service_graph.summary}"
 
+        # 7. Relevant git history (why/when this changed) — active repo only
+        recent_history = self._collect_history(task_description, candidates)
+        if recent_history and recent_history.summary:
+            summary += f" — history: {recent_history.summary}"
+
         return ContextPack(
             task=task_description,
             primary_files=primary,
             supporting_files=supporting,
             summary=summary,
             service_graph=service_graph,
+            recent_history=recent_history,
         )
 
     def _build_service_graph(self) -> Optional[ServiceGraph]:
@@ -220,6 +228,24 @@ class ContextEngine:
             return ServiceGraph(nodes=nodes, summary=raw.get("summary", ""))
         except Exception as exc:
             logger.warning(f"Service graph unavailable for context pack: {exc}")
+            return None
+
+    def _collect_history(
+        self, task_description: str, candidates: List[FileContext]
+    ) -> Optional[GitHistory]:
+        """Surface git commits relevant to the task. Never raises."""
+        try:
+            from app.modules.git_history import (
+                find_relevant_commits, summarize_history,
+            )
+            paths = [c.path for c in candidates if not c.repo]
+            commits = find_relevant_commits(str(self.repo_path), task_description, paths)
+            if not commits:
+                return None
+            infos = [CommitInfo(**c) for c in commits]
+            return GitHistory(commits=infos, summary=summarize_history(commits))
+        except Exception as exc:
+            logger.warning(f"Git history unavailable for context pack: {exc}")
             return None
 
 

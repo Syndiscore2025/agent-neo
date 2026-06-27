@@ -415,6 +415,12 @@ class AgentLoop:
             parts.append(
                 f"STACK / SERVICE GRAPH (manifests & cross-service deps):\n  {graph_summary}"
             )
+        # Relevant git history (why/when the related code last changed)
+        history_summary = context.get("history_summary")
+        if history_summary:
+            parts.append(
+                f"RELEVANT GIT HISTORY (why/when related code changed):\n  {history_summary}"
+            )
         # Inject VS Code diagnostics (errors / warnings from IDE)
         diagnostics = context.get("diagnostics") or []
         if diagnostics:

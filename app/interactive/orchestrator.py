@@ -600,6 +600,8 @@ class InteractiveOrchestrator:
         ]
         if pack.service_graph and pack.service_graph.summary:
             context["service_graph_summary"] = pack.service_graph.summary
+        if pack.recent_history and pack.recent_history.summary:
+            context["history_summary"] = pack.recent_history.summary
         return pack
 
     async def handle_auto_run(self, request: AutoRunRequest) -> AutoRunResponse:
@@ -751,6 +753,7 @@ class InteractiveOrchestrator:
                 "summary": pack.summary,
                 "files": context["context_files_with_reasons"],
                 "service_graph": pack.service_graph.model_dump() if pack.service_graph else None,
+                "recent_history": pack.recent_history.model_dump() if pack.recent_history else None,
             }
 
         repo_path = (
@@ -859,6 +862,7 @@ class InteractiveOrchestrator:
                 "summary": pack.summary,
                 "files": context["context_files_with_reasons"],
                 "service_graph": pack.service_graph.model_dump() if pack.service_graph else None,
+                "recent_history": pack.recent_history.model_dump() if pack.recent_history else None,
             }
 
         repo_path = (

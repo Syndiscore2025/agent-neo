@@ -224,6 +224,23 @@ class ServiceGraph(BaseModel):
     summary: str = ""
 
 
+class CommitInfo(BaseModel):
+    """A git commit surfaced as 'why/when did this change' context."""
+    sha: str
+    short_sha: str
+    author: str = ""
+    date: str = ""
+    subject: str = ""
+    files: List[str] = Field(default_factory=list)
+    reason: str = ""          # why it was surfaced, e.g. "touches payments.py"
+
+
+class GitHistory(BaseModel):
+    """Commits from git history relevant to the current task."""
+    commits: List[CommitInfo] = Field(default_factory=list)
+    summary: str = ""
+
+
 class ContextPack(BaseModel):
     """Ranked, explainable set of files relevant to a task."""
     task: str
@@ -231,6 +248,7 @@ class ContextPack(BaseModel):
     supporting_files: List[FileContext] = Field(default_factory=list)
     summary: str = ""
     service_graph: Optional[ServiceGraph] = None
+    recent_history: Optional[GitHistory] = None
 
 
 # ---------------------------------------------------------------------------

@@ -80,6 +80,10 @@ async def plan_task(model_router, task: str, context: dict) -> list[Phase]:
         context_lines.append(
             f"Stack / service graph: {context['service_graph_summary']}"
         )
+    if context.get("history_summary"):
+        context_lines.append(
+            f"Relevant git history: {context['history_summary']}"
+        )
     context_str = "\n".join(context_lines) if context_lines else "No additional context."
 
     prompt = _PLANNER_PROMPT.format(context=context_str, task=task)
