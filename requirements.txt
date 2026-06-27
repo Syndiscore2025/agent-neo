@@ -19,6 +19,12 @@ alembic>=1.13.0
 anthropic>=0.18.0
 openai>=1.12.0
 
+# Optional: local semantic embeddings for RepoIndex (Phase 2 live index).
+# Heavy (pulls in torch); the index degrades gracefully to keyword search when
+# absent, so this is intentionally left OUT of the default deploy footprint.
+# Enable locally with:  pip install sentence-transformers
+# sentence-transformers>=2.7.0
+
 # Image processing (for attachments)
 pillow>=10.2.0
 

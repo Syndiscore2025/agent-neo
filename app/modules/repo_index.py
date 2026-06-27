@@ -74,6 +74,8 @@ class RepoIndex:
         self._embed_model = None
         self._embed_attempted = False
         self._loaded = False
+        self._watch_thread: Optional[threading.Thread] = None
+        self._watch_stop = threading.Event()
         self.persist_dir = self._resolve_persist_dir()
 
     # ── persistence ──────────────────────────────────────────────────────────
@@ -290,6 +292,57 @@ class RepoIndex:
             logger.warning(f"Embedding update failed: {exc}")
             self._vectors = None
 
+    # ── background watcher ─────────────────────────────────────────────────────
+
+    def start_watching(self, interval: float = 30.0) -> bool:
+        """
+        Start a daemon thread that periodically refreshes the index so it stays
+        live as files change, instead of only refreshing on demand.
+
+        Idempotent: a no-op (returns False) if a watcher is already running.
+        The thread sleeps on a stop Event, so shutdown is immediate.
+        Returns True if a new watcher was started.
+        """
+        interval = max(1.0, float(interval))
+        with self._lock:
+            if self._watch_thread is not None and self._watch_thread.is_alive():
+                return False
+            self._watch_stop = threading.Event()
+            stop = self._watch_stop
+            thread = threading.Thread(
+                target=self._watch_loop,
+                args=(interval, stop),
+                name=f"repo-index-watch:{self.repo_path.name}",
+                daemon=True,
+            )
+            self._watch_thread = thread
+        thread.start()
+        logger.info(
+            f"RepoIndex watcher started for {self.repo_path} (every {interval:g}s)"
+        )
+        return True
+
+    def _watch_loop(self, interval: float, stop: threading.Event) -> None:
+        while not stop.is_set():
+            try:
+                self.refresh()
+            except Exception as exc:
+                logger.warning(f"Watch refresh failed for {self.repo_path}: {exc}")
+            stop.wait(interval)
+
+    def stop_watching(self, timeout: float = 5.0) -> None:
+        """Signal the watcher to stop and join its thread (no-op if not running)."""
+        with self._lock:
+            thread = self._watch_thread
+            self._watch_stop.set()
+            self._watch_thread = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+
+    @property
+    def is_watching(self) -> bool:
+        t = self._watch_thread
+        return t is not None and t.is_alive()
 
     # ── query API ────────────────────────────────────────────────────────────
 
@@ -406,7 +459,18 @@ def get_repo_index(repo_path: str) -> RepoIndex:
         return _INDEX_CACHE[key]
 
 
+def stop_all_watchers() -> None:
+    """Stop background watchers on every cached index (shutdown/tests)."""
+    with _CACHE_LOCK:
+        indexes = list(_INDEX_CACHE.values())
+    for idx in indexes:
+        idx.stop_watching()
+
+
 def reset_repo_index_cache() -> None:
     """Clear cached indexes (intended for tests)."""
     with _CACHE_LOCK:
+        indexes = list(_INDEX_CACHE.values())
         _INDEX_CACHE.clear()
+    for idx in indexes:
+        idx.stop_watching()

@@ -6,6 +6,7 @@ behavior; the semantic path is covered with a fake embedding model.
 
 import importlib
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -211,6 +212,54 @@ class TestSemanticPath:
         re_embedded = sum(len(c) for c in model.encode_calls)
         assert re_embedded == 1            # only users.py's single chunk
         assert re_embedded < first_build_chunks
+
+
+class TestBackgroundWatcher:
+    def test_watcher_picks_up_new_file(self, tmp_path):
+        repo = _make_repo(tmp_path)
+        index = RepoIndex(str(repo))
+        index.refresh()
+        assert index.get_file_metadata("late.py") is None
+
+        assert index.start_watching(interval=0.05) is True
+        try:
+            (repo / "late.py").write_text("def added():\n    return 1\n")
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                if index.get_file_metadata("late.py") is not None:
+                    break
+                time.sleep(0.05)
+            assert index.get_file_metadata("late.py") is not None
+        finally:
+            index.stop_watching()
+        assert index.is_watching is False
+
+    def test_start_watching_is_idempotent(self, tmp_path):
+        repo = _make_repo(tmp_path)
+        index = RepoIndex(str(repo))
+        try:
+            assert index.start_watching(interval=0.1) is True
+            assert index.start_watching(interval=0.1) is False
+            assert index.is_watching is True
+        finally:
+            index.stop_watching()
+
+    def test_stop_watching_joins_thread(self, tmp_path):
+        repo = _make_repo(tmp_path)
+        index = RepoIndex(str(repo))
+        index.start_watching(interval=0.1)
+        index.stop_watching()
+        assert index.is_watching is False
+
+    def test_reset_cache_stops_watchers(self, tmp_path):
+        rim = _live_module()
+        repo = _make_repo(tmp_path)
+        index = rim.get_repo_index(str(repo))
+        index.start_watching(interval=0.1)
+        assert index.is_watching is True
+
+        rim.reset_repo_index_cache()
+        assert index.is_watching is False
 
 
 class TestSharedInstance:

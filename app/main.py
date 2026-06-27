@@ -151,6 +151,20 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Model refresh loop not started: {e}")
 
+    # Live semantic index: opt-in background watcher that keeps each managed
+    # repo's RepoIndex fresh as files change (off by default to keep the hosted
+    # deploy lean). Enable with NEO_INDEX_WATCH=true; tune NEO_INDEX_WATCH_INTERVAL.
+    if os.getenv("NEO_INDEX_WATCH", "false").lower() == "true":
+        try:
+            from app.modules.managed_repos import get_managed_repo_registry
+            from app.modules.repo_index import get_repo_index
+            interval = float(os.getenv("NEO_INDEX_WATCH_INTERVAL", "30"))
+            for repo in get_managed_repo_registry().list_repos():
+                get_repo_index(repo["path"]).start_watching(interval)
+            logger.info("Live index watcher enabled")
+        except Exception as e:
+            logger.warning(f"Index watcher not started: {e}")
+
     logger.info("AGENT NEO ready")
 
     yield
@@ -158,6 +172,11 @@ async def lifespan(app: FastAPI):
     # Shutdown
     if refresh_task:
         refresh_task.cancel()
+    try:
+        from app.modules.repo_index import stop_all_watchers
+        stop_all_watchers()
+    except Exception as e:
+        logger.warning(f"Index watcher shutdown issue: {e}")
     logger.info("AGENT NEO shutting down...")
 
 
