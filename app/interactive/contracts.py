@@ -209,12 +209,28 @@ class FileContext(BaseModel):
     repo: Optional[str] = None  # managed-repo name when the file is from a non-active repo
 
 
+class ServiceNode(BaseModel):
+    """A service or manifest discovered in the repo's dependency graph."""
+    name: str
+    kind: str                 # "node" | "python" | "docker" | "compose-service"
+    manifest: str             # repo-relative path to the manifest it came from
+    depends_on: List[str] = Field(default_factory=list)
+    key_dependencies: List[str] = Field(default_factory=list)
+
+
+class ServiceGraph(BaseModel):
+    """Coarse cross-service dependency graph parsed from repo manifests."""
+    nodes: List[ServiceNode] = Field(default_factory=list)
+    summary: str = ""
+
+
 class ContextPack(BaseModel):
     """Ranked, explainable set of files relevant to a task."""
     task: str
     primary_files: List[FileContext] = Field(default_factory=list)
     supporting_files: List[FileContext] = Field(default_factory=list)
     summary: str = ""
+    service_graph: Optional[ServiceGraph] = None
 
 
 # ---------------------------------------------------------------------------

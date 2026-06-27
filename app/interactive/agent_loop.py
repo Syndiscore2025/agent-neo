@@ -409,6 +409,12 @@ class AgentLoop:
             parts.append(
                 f"RELEVANT FILES (selected by the context engine, with reasons):\n{file_lines}"
             )
+        # Cross-service dependency graph (so the agent understands the stack)
+        graph_summary = context.get("service_graph_summary")
+        if graph_summary:
+            parts.append(
+                f"STACK / SERVICE GRAPH (manifests & cross-service deps):\n  {graph_summary}"
+            )
         # Inject VS Code diagnostics (errors / warnings from IDE)
         diagnostics = context.get("diagnostics") or []
         if diagnostics:

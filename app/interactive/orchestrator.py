@@ -598,6 +598,8 @@ class InteractiveOrchestrator:
         context["context_files_with_reasons"] = [
             f.model_dump() for f in pack.primary_files + pack.supporting_files
         ]
+        if pack.service_graph and pack.service_graph.summary:
+            context["service_graph_summary"] = pack.service_graph.summary
         return pack
 
     async def handle_auto_run(self, request: AutoRunRequest) -> AutoRunResponse:
@@ -748,6 +750,7 @@ class InteractiveOrchestrator:
                 "type": "context_ready",
                 "summary": pack.summary,
                 "files": context["context_files_with_reasons"],
+                "service_graph": pack.service_graph.model_dump() if pack.service_graph else None,
             }
 
         repo_path = (
@@ -855,6 +858,7 @@ class InteractiveOrchestrator:
                 "type": "context_ready",
                 "summary": pack.summary,
                 "files": context["context_files_with_reasons"],
+                "service_graph": pack.service_graph.model_dump() if pack.service_graph else None,
             }
 
         repo_path = (

@@ -14,7 +14,13 @@ from app.modules.repo_context import (
     find_files_by_pattern,
     get_directory_structure
 )
-from app.interactive.contracts import ChatContext, ContextPack, FileContext
+from app.interactive.contracts import (
+    ChatContext,
+    ContextPack,
+    FileContext,
+    ServiceGraph,
+    ServiceNode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -190,12 +196,31 @@ class ContextEngine:
         if index_summary and not index_summary.get("embeddings_available"):
             summary += " — keyword search (embeddings unavailable)"
 
+        # 6. Coarse service/dependency graph (best-effort, never blocks a run)
+        service_graph = self._build_service_graph()
+        if service_graph and service_graph.summary:
+            summary += f" — stack: {service_graph.summary}"
+
         return ContextPack(
             task=task_description,
             primary_files=primary,
             supporting_files=supporting,
             summary=summary,
+            service_graph=service_graph,
         )
+
+    def _build_service_graph(self) -> Optional[ServiceGraph]:
+        """Parse repo manifests into a coarse dependency graph. Never raises."""
+        try:
+            from app.modules.service_graph import build_service_graph
+            raw = build_service_graph(str(self.repo_path))
+            nodes = [ServiceNode(**nd) for nd in raw.get("nodes", [])]
+            if not nodes:
+                return None
+            return ServiceGraph(nodes=nodes, summary=raw.get("summary", ""))
+        except Exception as exc:
+            logger.warning(f"Service graph unavailable for context pack: {exc}")
+            return None
 
 
     def _find_related_files_smart(

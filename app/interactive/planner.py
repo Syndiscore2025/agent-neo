@@ -76,6 +76,10 @@ async def plan_task(model_router, task: str, context: dict) -> list[Phase]:
         context_lines.append("Relevant files (selected by the context engine):")
         for f in pack_files[:10]:
             context_lines.append(f"  - {f.get('path', '?')} — {f.get('reason', '')}")
+    if context.get("service_graph_summary"):
+        context_lines.append(
+            f"Stack / service graph: {context['service_graph_summary']}"
+        )
     context_str = "\n".join(context_lines) if context_lines else "No additional context."
 
     prompt = _PLANNER_PROMPT.format(context=context_str, task=task)
