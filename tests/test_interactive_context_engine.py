@@ -142,12 +142,16 @@ class TestBuildContextPack:
     """Tests for the task-aware context pack (Phase B)."""
 
     @pytest.fixture(autouse=True)
-    def _isolated_index(self, monkeypatch):
+    def _isolated_index(self, monkeypatch, tmp_path):
         from app.modules.repo_index import reset_repo_index_cache
+        from app.modules.managed_repos import reset_managed_repo_registry
         monkeypatch.setenv("NEO_DISABLE_EMBEDDINGS", "1")
+        monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path / "_neo_data"))
         reset_repo_index_cache()
+        reset_managed_repo_registry()
         yield
         reset_repo_index_cache()
+        reset_managed_repo_registry()
 
     def _make_repo(self, tmp_path):
         (tmp_path / "payments.py").write_text(

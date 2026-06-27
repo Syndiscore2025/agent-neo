@@ -26,12 +26,16 @@ def _live_module():
 
 
 @pytest.fixture(autouse=True)
-def _isolated_index(monkeypatch):
-    """Disable real embeddings and clear the shared cache around each test."""
+def _isolated_index(monkeypatch, tmp_path):
+    """Disable real embeddings, isolate the registry, and clear caches."""
     monkeypatch.setenv("NEO_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("NEO_DATA_DIR", str(tmp_path / "_neo_data"))
+    from app.modules import managed_repos
     _live_module().reset_repo_index_cache()
+    managed_repos.reset_managed_repo_registry()
     yield
     _live_module().reset_repo_index_cache()
+    managed_repos.reset_managed_repo_registry()
 
 
 def _make_repo(tmp_path):
@@ -260,6 +264,76 @@ class TestBackgroundWatcher:
 
         rim.reset_repo_index_cache()
         assert index.is_watching is False
+
+
+class TestCrossRepoSearch:
+    def _two_repos(self, tmp_path):
+        repo_a = tmp_path / "a"
+        repo_a.mkdir()
+        (repo_a / "payments.py").write_text(
+            "def compute_payment_schedule():\n    return 1\n"
+        )
+        repo_b = tmp_path / "b"
+        repo_b.mkdir()
+        (repo_b / "billing.py").write_text(
+            "def payment_invoice():\n    return 2\n"
+        )
+        return repo_a, repo_b
+
+    def test_fans_out_with_provenance(self, tmp_path):
+        rim = _live_module()
+        repo_a, repo_b = self._two_repos(tmp_path)
+        repos = [(str(repo_a), "a"), (str(repo_b), "b")]
+
+        results = rim.search_across_repos(
+            "payment", k=10, active_path=str(repo_a), repos=repos
+        )
+
+        assert results
+        assert {r["repo_name"] for r in results} == {"a", "b"}
+        assert all("repo_path" in r and "is_active" in r for r in results)
+        active = [r for r in results if r["is_active"]]
+        assert active and all(
+            r["repo_path"] == str(repo_a.resolve()) for r in active
+        )
+
+    def test_results_are_bounded(self, tmp_path):
+        rim = _live_module()
+        repo_a, repo_b = self._two_repos(tmp_path)
+        for i in range(5):
+            (repo_a / f"m{i}.py").write_text(f"def payment_{i}():\n    return {i}\n")
+        repos = [(str(repo_a), "a"), (str(repo_b), "b")]
+
+        results = rim.search_across_repos(
+            "payment", k=3, active_path=str(repo_a), repos=repos
+        )
+        assert len(results) <= 3
+
+    def test_other_repo_surfaces_when_active_dominates(self, tmp_path):
+        rim = _live_module()
+        repo_a, repo_b = self._two_repos(tmp_path)
+        for i in range(8):
+            (repo_a / f"m{i}.py").write_text(f"def payment_{i}():\n    return {i}\n")
+        repos = [(str(repo_a), "a"), (str(repo_b), "b")]
+
+        results = rim.search_across_repos(
+            "payment", k=6, active_path=str(repo_a), repos=repos
+        )
+        assert any(not r["is_active"] for r in results)
+
+    def test_gathers_from_registry_when_repos_omitted(self, tmp_path):
+        rim = _live_module()
+        from app.modules.managed_repos import get_managed_repo_registry
+        import subprocess
+
+        repo_a, _ = self._two_repos(tmp_path)
+        subprocess.run(["git", "init", "-b", "main"], cwd=str(repo_a),
+                       check=True, capture_output=True)
+        get_managed_repo_registry().attach(str(repo_a), "a")
+
+        results = rim.search_across_repos("payment", k=5, active_path=str(repo_a))
+        assert results
+        assert any(r["repo_name"] == "a" and r["is_active"] for r in results)
 
 
 class TestSharedInstance:

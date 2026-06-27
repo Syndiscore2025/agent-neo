@@ -342,16 +342,17 @@ class ToolExecutor:
         query = inp["query"]
         top_k = int(inp.get("top_k", 8))
 
-        # Use the shared per-repo index (semantic with keyword fallback inside)
+        # Fan out across all managed repos (semantic with keyword fallback inside);
+        # results from non-active repos are tagged with their repo name.
         try:
-            from app.modules.repo_index import get_repo_index
-            index = get_repo_index(str(self.repo_path))
-            results = index.search(query, k=top_k)
+            from app.modules.repo_index import search_across_repos
+            results = search_across_repos(query, k=top_k, active_path=str(self.repo_path))
             if results:
-                return "\n---\n".join(
-                    f"[{r['path']}] ({r['reason']})\n{r['snippet'][:200]}"
-                    for r in results
-                )
+                lines = []
+                for r in results:
+                    tag = "" if r.get("is_active", True) else f" @{r.get('repo_name') or 'repo'}"
+                    lines.append(f"[{r['path']}]{tag} ({r['reason']})\n{r['snippet'][:200]}")
+                return "\n---\n".join(lines)
         except Exception as exc:
             logger.warning(f"RepoIndex search failed: {exc}, falling back to keyword")
 

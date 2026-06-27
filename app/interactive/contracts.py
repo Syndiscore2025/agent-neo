@@ -205,7 +205,8 @@ class FileContext(BaseModel):
     reason: str               # human-readable, e.g. "semantic match for 'payments'"
     score: Optional[float] = None
     source: str = "search"    # "active_file" | "import" | "test_file" | "sibling"
-                              # | "semantic" | "keyword" | "convention"
+                              # | "semantic" | "keyword" | "convention" | "cross_repo"
+    repo: Optional[str] = None  # managed-repo name when the file is from a non-active repo
 
 
 class ContextPack(BaseModel):

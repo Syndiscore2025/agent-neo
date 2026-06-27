@@ -109,14 +109,18 @@ class ContextEngine:
         Degrades to heuristics-only if the RepoIndex is unavailable.
         """
         candidates: List[FileContext] = []
-        seen: Set[str] = set()
+        seen: Set = set()
 
-        def add(path: str, reason: str, source: str, score: Optional[float] = None):
+        def add(path: str, reason: str, source: str,
+                score: Optional[float] = None, repo: Optional[str] = None):
             norm = Path(path).as_posix()
-            if norm in seen or len(candidates) >= self.max_pack_files:
+            key = (repo or "", norm)
+            if key in seen or len(candidates) >= self.max_pack_files:
                 return
-            seen.add(norm)
-            candidates.append(FileContext(path=norm, reason=reason, source=source, score=score))
+            seen.add(key)
+            candidates.append(
+                FileContext(path=norm, reason=reason, source=source, score=score, repo=repo)
+            )
 
         current_file = chat_context.current_file if chat_context else None
         current_content = chat_context.current_file_content if chat_context else None
@@ -137,21 +141,30 @@ class ContextEngine:
             if test_file:
                 add(test_file, f"likely test file for {Path(current_file).name}", "test_file")
 
-        # 4. Task-driven search via the shared RepoIndex
+        # 4. Task-driven search across all managed repos (active repo leads)
         index_summary = None
+        cross_repo = 0
         try:
-            from app.modules.repo_index import get_repo_index
-            index = get_repo_index(str(self.repo_path))
-            for result in index.search(task_description, k=12):
-                meta = index.get_file_metadata(result["path"]) or {}
+            from app.modules.repo_index import get_repo_index, search_across_repos
+            active_path = str(self.repo_path)
+            for result in search_across_repos(task_description, k=12, active_path=active_path):
+                meta = get_repo_index(result["repo_path"]).get_file_metadata(result["path"]) or {}
+                is_active = result.get("is_active", True)
+                repo_name = result.get("repo_name")
                 if meta.get("is_convention"):
                     reason = f"convention file: {Path(result['path']).name} ({result['reason']})"
                     source = "convention"
                 else:
                     reason = result["reason"]
                     source = "semantic" if result["reason"].startswith("semantic") else "keyword"
-                add(result["path"], reason, source, score=result.get("score"))
-            index_summary = index.summarize()
+                if not is_active:
+                    reason = f"[{repo_name}] {reason}"
+                    source = "cross_repo"
+                    cross_repo += 1
+                add(result["path"], reason, source,
+                    score=result.get("score"),
+                    repo=None if is_active else repo_name)
+            index_summary = get_repo_index(active_path).summarize()
         except Exception as exc:
             logger.warning(f"RepoIndex unavailable for context pack: {exc}")
 
@@ -172,6 +185,8 @@ class ContextEngine:
             f"'{task_description.strip()[:60]}'"
             + (f" ({breakdown})" if breakdown else "")
         )
+        if cross_repo:
+            summary += f" — incl. {cross_repo} from other managed repos"
         if index_summary and not index_summary.get("embeddings_available"):
             summary += " — keyword search (embeddings unavailable)"
 

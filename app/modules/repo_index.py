@@ -474,3 +474,81 @@ def reset_repo_index_cache() -> None:
         _INDEX_CACHE.clear()
     for idx in indexes:
         idx.stop_watching()
+
+
+# ── multi-repo unified search ─────────────────────────────────────────────────
+
+def _gather_managed_repos(active_path: Optional[str] = None) -> List[tuple]:
+    """
+    Collect (repo_path, repo_name) for every managed repo on disk, always
+    including the active repo. Missing paths are skipped. Registry is optional.
+    """
+    repos: List[tuple] = []
+    seen: set = set()
+    try:
+        from app.modules.managed_repos import get_managed_repo_registry
+        for r in get_managed_repo_registry().list_repos():
+            p = r.get("path")
+            if p and Path(p).is_dir():
+                key = str(Path(p).resolve())
+                if key not in seen:
+                    seen.add(key)
+                    repos.append((p, r.get("name") or Path(p).name))
+    except Exception as exc:
+        logger.debug(f"Managed repo registry unavailable: {exc}")
+    if active_path and Path(active_path).is_dir():
+        key = str(Path(active_path).resolve())
+        if key not in seen:
+            repos.append((active_path, Path(active_path).name))
+    return repos
+
+
+def search_across_repos(
+    task_text: str,
+    k: int = 12,
+    active_path: Optional[str] = None,
+    repos: Optional[List[tuple]] = None,
+) -> List[dict]:
+    """
+    Fan out a search across multiple managed repos and return merged, ranked
+    results. Each result is a per-repo search dict plus provenance keys:
+    'repo_path', 'repo_name', 'is_active'.
+
+    The active repo leads; remaining slots are filled by the best-scoring
+    results from other repos so the stack stays represented. Bounded to `k`.
+    `repos` is an iterable of (repo_path, repo_name); gathered from the managed
+    repo registry when omitted.
+    """
+    if repos is None:
+        repos = _gather_managed_repos(active_path)
+    active_key = str(Path(active_path).resolve()) if active_path else None
+
+    active_hits: List[dict] = []
+    other_hits: List[dict] = []
+    for repo_path, repo_name in repos:
+        try:
+            rkey = str(Path(repo_path).resolve())
+            is_active = active_key is not None and rkey == active_key
+            per_k = k if is_active else max(1, k // 2)
+            for r in get_repo_index(repo_path).search(task_text, k=per_k):
+                tagged = dict(r)
+                tagged["repo_path"] = rkey
+                tagged["repo_name"] = repo_name
+                tagged["is_active"] = is_active
+                (active_hits if is_active else other_hits).append(tagged)
+        except Exception as exc:
+            logger.warning(f"Cross-repo search failed for {repo_path}: {exc}")
+
+    other_hits.sort(key=lambda r: r.get("score") or 0.0, reverse=True)
+    if active_key is None:
+        merged = sorted(
+            active_hits + other_hits,
+            key=lambda r: r.get("score") or 0.0, reverse=True,
+        )
+        return merged[:k]
+    # Reserve a few slots so other repos still surface when the active repo
+    # dominates the ranking.
+    reserved = max(1, k // 3) if other_hits else 0
+    merged = active_hits[: k - reserved]
+    merged.extend(other_hits[: k - len(merged)])
+    return merged[:k]
