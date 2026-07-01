@@ -57,6 +57,16 @@ class ChatPanel {
     constructor(context) {
         this.context = context;
         this.auggie = new auggieRunner_1.AuggieRunner();
+        // Valid Auggie model ids from `auggie model list`; guards the -m flag so we
+        // never pass a Neo model id (e.g. "claude-opus") to the Auggie CLI.
+        this.auggieModelIds = new Set();
+        // Most recent Auggie session id for this chat thread. Passed as `-r <id>`
+        // on the next run so Auggie remembers the conversation. Reset on
+        // clear-session / new-thread. null → next run starts a fresh session.
+        this.auggieSessionId = null;
+        // Follow-up prompts sent while an Auggie run is active. Drained one at a
+        // time when the current run finishes (sequential execution).
+        this.auggieQueue = [];
         this.selectedModel = ''; // empty → backend DEFAULT_MODEL
         this.apiClient = new apiClient_1.ApiClient();
         this.storage = new storage_1.NeoStorage(context);
@@ -179,7 +189,7 @@ class ChatPanel {
                     await this.loadHistory();
                 }
                 void this.initWorkspaceInfo();
-                void this.sendModelList();
+                void this.pushModelCatalog();
                 break;
             case 'openFile':
                 await this._revealFile(message.path);
@@ -216,6 +226,12 @@ class ChatPanel {
                 break;
             case 'autoRun':
                 await this.handleAutoRun(message.task, message.model);
+                break;
+            case 'stopAuggie':
+                this.stopAuggie();
+                break;
+            case 'enhancePrompt':
+                await this.handleEnhancePrompt(message.text, message.model);
                 break;
             case 'cloneRepo':
                 await this.handleCloneRepo(message.url);
@@ -373,6 +389,9 @@ class ChatPanel {
             }
         }
         this.sessionId = undefined;
+        // Drop Auggie conversation memory + any queued follow-ups.
+        this.auggieSessionId = null;
+        this.auggieQueue = [];
         this.post({
             type: 'sessionCleared'
         });
@@ -388,6 +407,8 @@ class ChatPanel {
             .update('agentBackend', value, vscode.ConfigurationTarget.Global);
         vscode.window.showInformationMessage('Agent backend set to ' + (value === 'auggie' ? 'Auggie CLI (local)' : 'Neo backend') + '.');
         await this.handleGetSettingsInfo();
+        // Refresh the composer model picker for the newly-selected backend.
+        await this.pushModelCatalog();
     }
     /**
      * Flip the Terminal Agent Orchestrator master toggle
@@ -814,6 +835,36 @@ class ChatPanel {
                         cursor: not-allowed;
                     }
 
+                    /* Stop button — hidden unless a run is active */
+                    #stopBtn {
+                        display: none;
+                        background: var(--vscode-inputValidation-errorBackground, #5a1d1d);
+                        color: var(--vscode-button-foreground);
+                        border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
+                        padding: 8px 12px;
+                        cursor: pointer;
+                        font-size: 13px;
+                        border-radius: 2px;
+                        white-space: nowrap;
+                    }
+                    #stopBtn.visible { display: inline-block; }
+                    #stopBtn:hover { opacity: 0.85; }
+
+                    /* Enhance button — busy state while the rewrite is running */
+                    #enhanceBtn.busy { opacity: 0.6; cursor: progress; }
+
+                    /* Queue indicator pill — shows how many follow-ups are waiting */
+                    #queueIndicator {
+                        display: none;
+                        font-size: 11px;
+                        padding: 2px 8px;
+                        border-radius: 10px;
+                        background: var(--vscode-badge-background);
+                        color: var(--vscode-badge-foreground);
+                        white-space: nowrap;
+                    }
+                    #queueIndicator.visible { display: inline-block; }
+
                     /* ── Model picker ── */
                     #modelSelect {
                         background: var(--vscode-dropdown-background);
@@ -856,6 +907,18 @@ class ChatPanel {
                     .auto-run-header {
                         font-size: 13px;
                         margin-bottom: 8px;
+                    }
+                    /* Live "thinking" indicator — pulsing label + ticking timer */
+                    .run-timer {
+                        margin-left: 8px;
+                        font-variant-numeric: tabular-nums;
+                        opacity: 0.7;
+                        font-size: 12px;
+                    }
+                    #srPhase strong { animation: neoPulse 1.4s ease-in-out infinite; }
+                    @keyframes neoPulse {
+                        0%, 100% { opacity: 1; }
+                        50% { opacity: 0.5; }
                     }
                     .auto-run-steps {
                         display: flex;
@@ -1213,10 +1276,13 @@ class ChatPanel {
                             <button id="attachBtn" title="Attach image or PDF">📎</button>
                             <input type="file" id="fileInput" accept="image/*,.pdf" style="display:none">
                             <button id="micBtn" title="Speak your message (Speech-to-Text)">🎤</button>
+                            <button id="enhanceBtn" title="Enhance prompt — rewrite your input into a clearer, more detailed prompt (fills the box for review; never auto-sends)">✨</button>
+                            <span id="queueIndicator" title="Follow-up prompts waiting to run"></span>
                         </div>
                         <div class="composer-right">
                             <select id="modelSelect" title="Model for this run"></select>
                             <button id="modelRefreshBtn" title="Refresh model list from providers">↻</button>
+                            <button id="stopBtn" title="Stop the running agent and clear the queue">⏹ Stop</button>
                             <button id="sendBtn">Send</button>
                         </div>
                     </div>
@@ -1228,6 +1294,9 @@ class ChatPanel {
                     const messageInput = document.getElementById('messageInput');
                     const modelSelect = document.getElementById('modelSelect');
                     const sendBtn = document.getElementById('sendBtn');
+                    const stopBtn = document.getElementById('stopBtn');
+                    const queueIndicator = document.getElementById('queueIndicator');
+                    const enhanceBtn = document.getElementById('enhanceBtn');
                     const clearBtn = document.getElementById('clearBtn');
                     const newThreadBtn = document.getElementById('newThreadBtn');
                     const attachBtn = document.getElementById('attachBtn');
@@ -1247,6 +1316,35 @@ class ChatPanel {
                     // ── Phase D: run-state tracking + card helpers ──
                     let runState = null;      // per-run summary data, reset on streamRunStart
                     let lastContext = null;   // last context_ready payload (shown in settings)
+
+                    // ── Live "thinking" indicator: pulsing label + m:ss timer ──
+                    let runTimerId = null;      // setInterval handle for the live timer
+                    let runStartMs = 0;         // timestamp the current run began
+                    let runResponding = false;  // flipped true once the first text token streams
+                    function fmtElapsed(ms) {
+                        const s = Math.floor(ms / 1000);
+                        return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+                    }
+                    function startRunTimer() {
+                        runStartMs = Date.now();
+                        runResponding = false;
+                        if (runTimerId) { clearInterval(runTimerId); }
+                        const tick = () => {
+                            const el = document.getElementById('srTimer');
+                            if (el) { el.textContent = fmtElapsed(Date.now() - runStartMs); }
+                        };
+                        tick();
+                        runTimerId = setInterval(tick, 1000);
+                    }
+                    function stopRunTimer() {
+                        if (runTimerId) { clearInterval(runTimerId); runTimerId = null; }
+                    }
+                    function markResponding() {
+                        if (runResponding) { return; }
+                        runResponding = true;
+                        const el = document.getElementById('srPhase');
+                        if (el) { el.innerHTML = '✍️ <strong>Generating…</strong>'; }
+                    }
 
                     // ── Polish: persisted webview state (survives reload/hide) ──
                     const persisted = vscode.getState() || {};
@@ -1819,22 +1917,40 @@ class ChatPanel {
                     });
 
                     sendBtn.addEventListener('click', sendMessage);
+                    stopBtn.addEventListener('click', () => {
+                        stopRunTimer();
+                        vscode.postMessage({ type: 'stopAuggie' });
+                    });
+                    // Enhance: send the current input to the host for a rewrite.
+                    // The result comes back via 'promptEnhanced' and only PREFILLS
+                    // the box — it is never auto-sent (review-before-send rule).
+                    enhanceBtn.addEventListener('click', () => {
+                        const text = messageInput.value.trim();
+                        if (!text) { return; }
+                        vscode.postMessage({ type: 'enhancePrompt', text: text, model: selectedModel || undefined });
+                    });
+                    // Render the "N queued" pill (hidden when the queue is empty).
+                    function setQueueIndicator(count) {
+                        if (count > 0) {
+                            queueIndicator.textContent = '⏳ ' + count + ' queued';
+                            queueIndicator.classList.add('visible');
+                        } else {
+                            queueIndicator.textContent = '';
+                            queueIndicator.classList.remove('visible');
+                        }
+                    }
                     clearBtn.addEventListener('click', clearSession);
                     newThreadBtn.addEventListener('click', () => {
                         vscode.postMessage({ type: 'newThread' });
                     });
 
                     // ── SLICE 6 — attach button ──
-                    attachBtn.addEventListener('click', () => fileInput.click());
-
-                    fileInput.addEventListener('change', () => {
-                        const file = fileInput.files && fileInput.files[0];
+                    // Shared upload path for both the file picker and clipboard paste.
+                    function uploadFile(file, fallbackName) {
                         if (!file) return;
-                        fileInput.value = ''; // reset so same file can be re-selected
-
-                        const isPdf = file.type === 'application/pdf' || file.name.endsWith('.pdf');
+                        const name = file.name || fallbackName || ('pasted-' + Date.now() + '.png');
+                        const isPdf = file.type === 'application/pdf' || name.endsWith('.pdf');
                         const fileType = isPdf ? 'pdf' : 'image';
-
                         const reader = new FileReader();
                         reader.onload = (ev) => {
                             // Strip data-URL prefix: "data:<mime>;base64,"
@@ -1842,12 +1958,42 @@ class ChatPanel {
                             const base64 = dataUrl.split(',')[1];
                             vscode.postMessage({
                                 type: 'uploadAttachment',
-                                fileName: file.name,
+                                fileName: name,
                                 fileType: fileType,
                                 contentBase64: base64
                             });
                         };
                         reader.readAsDataURL(file);
+                    }
+
+                    attachBtn.addEventListener('click', () => fileInput.click());
+
+                    fileInput.addEventListener('change', () => {
+                        const file = fileInput.files && fileInput.files[0];
+                        if (!file) return;
+                        fileInput.value = ''; // reset so same file can be re-selected
+                        uploadFile(file);
+                    });
+
+                    // ── Paste an image straight from the clipboard (Ctrl+V) ──
+                    // Screenshots on the clipboard arrive as image "file" items; grab
+                    // them and route through the same upload path instead of pasting
+                    // the binary as text into the box.
+                    messageInput.addEventListener('paste', (e) => {
+                        const items = (e.clipboardData && e.clipboardData.items) || [];
+                        let handled = false;
+                        for (let i = 0; i < items.length; i++) {
+                            const it = items[i];
+                            if (it.kind === 'file' && it.type && it.type.indexOf('image/') === 0) {
+                                const blob = it.getAsFile();
+                                if (blob) {
+                                    const ext = (it.type.split('/')[1] || 'png').split('+')[0];
+                                    uploadFile(blob, 'pasted-' + Date.now() + '.' + ext);
+                                    handled = true;
+                                }
+                            }
+                        }
+                        if (handled) { e.preventDefault(); }
                     });
 
                     // ── Speech-to-Text via Web Speech API ──────────────────────────────
@@ -2326,12 +2472,36 @@ class ChatPanel {
                                 break;
 
                             case 'sessionCleared':
+                                stopRunTimer();
                                 messagesDiv.innerHTML = '';
                                 messageCount = 0;
                                 threads = [];
                                 activeThreadId = null;
+                                setQueueIndicator(0);
+                                stopBtn.classList.remove('visible');
                                 renderThreads();
                                 scheduleSaveState();
+                                break;
+
+                            // Host reports how many follow-up prompts are queued.
+                            case 'auggieQueued':
+                                setQueueIndicator(message.count || 0);
+                                break;
+
+                            // Prompt enhancer: busy toggle, result prefill, error.
+                            case 'promptEnhancing':
+                                enhanceBtn.classList.toggle('busy', !!message.on);
+                                enhanceBtn.disabled = !!message.on;
+                                break;
+                            case 'promptEnhanced':
+                                // Prefill only — never auto-send (safety rule).
+                                messageInput.value = message.text;
+                                autoGrow();
+                                messageInput.focus();
+                                scrollToBottom();
+                                break;
+                            case 'promptEnhanceError':
+                                addMessage('assistant', '⚠️ ' + message.message);
                                 break;
 
                             case 'loadHistory':
@@ -2390,6 +2560,8 @@ class ChatPanel {
 
                             // ── Live streaming run card ──────────────────────────
                             case 'streamRunStart': {
+                                // A run is live — reveal the Stop button.
+                                stopBtn.classList.add('visible');
                                 // Neutralise any stale live-card ids left over from a prior run.
                                 // streamRunDone only clears the outer id, so the inner ids
                                 // (srHeader/srSteps/srTokens) could otherwise duplicate and make
@@ -2418,11 +2590,12 @@ class ChatPanel {
                                 card.dataset.runId = runId;
                                 card.innerHTML =
                                     '<div class="auto-run-card">' +
-                                    '<div class="auto-run-header" id="srHeader">⚙️ <strong>Running…</strong></div>' +
+                                    '<div class="auto-run-header" id="srHeader"><span id="srPhase">🧠 <strong>Thinking…</strong></span><span class="run-timer" id="srTimer">0:00</span></div>' +
                                     '<div class="auto-run-steps" id="srSteps"></div>' +
                                     '<div id="srTokens" style="font-style:italic;opacity:0.75;font-size:12px;padding-top:4px;white-space:pre-wrap"></div>' +
                                     '</div>';
                                 messagesDiv.appendChild(card);
+                                startRunTimer();
                                 scrollToBottom();
                                 break;
                             }
@@ -2434,6 +2607,7 @@ class ChatPanel {
                                 const headerEl = document.getElementById('srHeader');
 
                                 if (ev.type === 'text' && tokensEl) {
+                                    markResponding();
                                     tokensEl.textContent += ev.content || '';
                                     scrollToBottom();
 
@@ -2448,7 +2622,10 @@ class ChatPanel {
 
                                 // ── Phased planning / task progress ──
                                 } else if (ev.type === 'planning') {
-                                    if (headerEl) { headerEl.innerHTML = '🧭 <strong>Planning:</strong> ' + escapeHtml(ev.task || ''); }
+                                    // Keep the live timer alive by updating only the label span.
+                                    const ph = document.getElementById('srPhase');
+                                    if (ph) { ph.innerHTML = '🧭 <strong>Planning:</strong> ' + escapeHtml(ev.task || ''); }
+                                    else if (headerEl) { headerEl.innerHTML = '🧭 <strong>Planning:</strong> ' + escapeHtml(ev.task || ''); }
                                 } else if (ev.type === 'phase_plan') {
                                     let rows = '';
                                     (ev.phases || []).forEach((p, i) => {
@@ -2579,7 +2756,13 @@ class ChatPanel {
                                 } else if (ev.type === 'finish') {
                                     trackFiles(ev.files);
                                     if (headerEl) {
-                                        headerEl.innerHTML = (ev.success ? '✅' : '❌') + ' <strong>AutoRun done</strong>';
+                                        // Keep a real error header — don't mask the failure
+                                        // reason with a generic "AutoRun done" when the run
+                                        // already errored out (e.g. Auggie edited files then
+                                        // exited non-zero).
+                                        if (!(!ev.success && runState && runState.error)) {
+                                            headerEl.innerHTML = (ev.success ? '✅' : '❌') + ' <strong>AutoRun done</strong>';
+                                        }
                                     }
                                     if (tokensEl && ev.summary) {
                                         // Preserve the streamed reply/answer. If the agent
@@ -2618,23 +2801,30 @@ class ChatPanel {
                                     scrollToBottom();
                                 } else if (ev.type === 'error') {
                                     if (runState) { runState.error = true; }
+                                    var rawErr = ev.error || 'Unknown error';
+                                    var friendlyErr = rawErr;
+                                    if (rawErr.indexOf('401') !== -1) {
+                                        friendlyErr = '401 — token rejected. Make sure agentNeo.apiToken matches the server AGENT_NEO_TOKEN, then run Developer: Reload Window.';
+                                    } else if (rawErr.indexOf('403') !== -1) {
+                                        friendlyErr = '403 — forbidden. The backend rejected this request.';
+                                    } else if (rawErr.indexOf('Failed to fetch') !== -1 || rawErr.indexOf('ECONNREFUSED') !== -1) {
+                                        friendlyErr = 'Could not reach the backend. Check agentNeo.apiUrl, then reload the window.';
+                                    }
+                                    if (runState) { runState.errorMessage = friendlyErr; }
                                     if (headerEl) {
-                                        var rawErr = ev.error || 'Unknown error';
-                                        var friendlyErr = rawErr;
-                                        if (rawErr.indexOf('401') !== -1) {
-                                            friendlyErr = '401 — token rejected. Make sure agentNeo.apiToken matches the server AGENT_NEO_TOKEN, then run Developer: Reload Window.';
-                                        } else if (rawErr.indexOf('403') !== -1) {
-                                            friendlyErr = '403 — forbidden. The backend rejected this request.';
-                                        } else if (rawErr.indexOf('Failed to fetch') !== -1 || rawErr.indexOf('ECONNREFUSED') !== -1) {
-                                            friendlyErr = 'Could not reach the backend. Check agentNeo.apiUrl, then reload the window.';
-                                        }
                                         headerEl.innerHTML = '❌ <strong>Error:</strong> ' + escapeHtml(friendlyErr);
                                     }
+                                    // Also drop a persistent error card so the real reason
+                                    // survives even if a later 'finish' event rewrites the
+                                    // header or the header scrolls out of view.
+                                    appendRunCard('<div class="neo-card-title">❌ Run error</div>' +
+                                        '<div class="neo-card-body" style="white-space:pre-wrap">' + escapeHtml(friendlyErr) + '</div>', 'err');
                                 }
                                 break;
                             }
 
                             case 'streamRunDone': {
+                                stopRunTimer();
                                 // Remove the live card id AND its inner ids so future events
                                 // (and the next run's streamRunStart) can't accidentally target
                                 // this finished card via getElementById.
@@ -2721,6 +2911,9 @@ class ChatPanel {
                                 }
                                 isLoading = false;
                                 sendBtn.disabled = false;
+                                // Run finished — hide Stop. A queued follow-up (if
+                                // any) re-shows it via the next streamRunStart.
+                                stopBtn.classList.remove('visible');
                                 break;
                             }
 
@@ -2781,6 +2974,9 @@ class ChatPanel {
      * Handle "Continue in New Thread" — summarise + switch session.
      */
     async handleNewThread() {
+        // A new thread means a fresh Auggie conversation — forget memory + queue.
+        this.auggieSessionId = null;
+        this.auggieQueue = [];
         if (!this.sessionId) {
             // No active session yet — just present a fresh, empty thread.
             this.post({ type: 'sessionCleared' });
@@ -2896,24 +3092,36 @@ class ChatPanel {
      * Each event is forwarded to the webview as it arrives so step cards
      * update in real-time instead of waiting for the full loop to finish.
      */
-    async handleAutoRun(task, model) {
+    async handleAutoRun(task, model, fromQueue = false) {
         if (!task) {
             return;
         }
         if (model !== undefined) {
             this.selectedModel = model;
         }
-        // Echo the user's task into the chat exactly as typed
-        this.post({ type: 'userMessage', message: task });
+        const backend = vscode.workspace
+            .getConfiguration('agentNeo')
+            .get('agentBackend', 'neo');
+        // Auggie follow-up queue: if a run is already active, hold this prompt
+        // and run it when the current one finishes (sequential execution).
+        // Queued prompts are echoed here; the run card opens later on drain.
+        if (!fromQueue && backend === 'auggie' && this.auggie.isRunning()) {
+            this.auggieQueue.push(task);
+            this.post({ type: 'userMessage', message: task });
+            this.post({ type: 'auggieQueued', count: this.auggieQueue.length });
+            return;
+        }
+        // Echo the user's task into the chat exactly as typed. Queued prompts
+        // were already echoed when they were queued, so skip the re-echo.
+        if (!fromQueue) {
+            this.post({ type: 'userMessage', message: task });
+        }
         // Capture the pre-run git ref so summary chips can open diff previews
         const repo = await this._getGitRepo();
         const preRunRef = repo?.state?.HEAD?.commit ?? null;
         // Open a live streaming card in the webview
         this.post({ type: 'streamRunStart', task, preRunRef });
         // Backend selection: local Auggie CLI vs the Neo HTTP backend.
-        const backend = vscode.workspace
-            .getConfiguration('agentNeo')
-            .get('agentBackend', 'neo');
         if (backend === 'auggie') {
             await this.runAuggie(task);
             return;
@@ -3000,9 +3208,16 @@ class ChatPanel {
             return;
         }
         try {
+            // Forward the picked model only if it's a real Auggie id; otherwise
+            // let Auggie use its own default (never pass a Neo model id).
+            const model = (this.selectedModel && this.auggieModelIds.has(this.selectedModel))
+                ? this.selectedModel
+                : '';
+            // Resume the thread's Auggie session so it remembers prior turns.
+            const resume = this.auggieSessionId || undefined;
             const ok = await this.auggie.run(task, folder.uri.fsPath, (ev) => {
                 this.post({ type: 'streamEvent', event: ev });
-            });
+            }, model, resume);
             // Post-run: surface changed files (no auto-commit / no push).
             const repo = await this._getGitRepo();
             const changes = [
@@ -3011,15 +3226,14 @@ class ChatPanel {
             ];
             const files = changes.map((c) => ({ path: vscode.workspace.asRelativePath(c.uri) }));
             if (ok) {
-                const summary = files.length
-                    ? 'Auggie changed ' + files.length + ' file(s). Review them in Source Control and commit manually — nothing was committed or pushed.'
-                    : 'Auggie run complete — no file changes detected.';
-                this.post({ type: 'streamEvent', event: { type: 'finish', success: true, files, summary } });
+                // No inline summary footer — the streamed answer stays as-is and the
+                // "Run summary" card below already reports changed files (or none).
+                this.post({ type: 'streamEvent', event: { type: 'finish', success: true, files } });
             }
             else if (files.length) {
                 // Run failed, but it left edits behind — flag them without masking
                 // the error card the runner already emitted with the real reason.
-                this.post({ type: 'streamEvent', event: { type: 'finish', success: false, files, summary: 'Auggie run failed — see the error above. It left ' + files.length + ' uncommitted file change(s) to review.' } });
+                this.post({ type: 'streamEvent', event: { type: 'finish', success: false, files } });
             }
             // On failure with no files, the runner's error event stands alone.
         }
@@ -3027,7 +3241,22 @@ class ChatPanel {
             this.post({ type: 'streamEvent', event: { type: 'error', error: error?.message || String(error) } });
         }
         finally {
+            // Capture the (possibly new) session id so the next prompt resumes
+            // THIS conversation — this is what gives Auggie its memory.
+            try {
+                const sid = await this.auggie.getLatestSessionId(folder.uri.fsPath);
+                if (sid) {
+                    this.auggieSessionId = sid;
+                }
+            }
+            catch { /* keep the previous id */ }
             this.post({ type: 'streamRunDone' });
+            // Drain one queued follow-up, if any (sequential execution).
+            if (this.auggieQueue.length) {
+                const next = this.auggieQueue.shift();
+                this.post({ type: 'auggieQueued', count: this.auggieQueue.length });
+                void this.handleAutoRun(next, undefined, true);
+            }
         }
     }
     /**
@@ -3045,11 +3274,21 @@ class ChatPanel {
      * Stop the active Auggie subprocess (command palette / Stop button).
      */
     stopAuggie() {
+        // Stopping cancels the active run AND any queued follow-ups.
+        const hadQueue = this.auggieQueue.length;
+        this.auggieQueue = [];
         if (this.auggie.isRunning()) {
             this.auggie.stop();
             this.post({ type: 'streamEvent', event: { type: 'error', error: 'Auggie session stopped.' } });
             this.post({ type: 'streamRunDone' });
-            vscode.window.showInformationMessage('Auggie session stopped.');
+            if (hadQueue) {
+                this.post({ type: 'auggieQueued', count: 0 });
+            }
+            vscode.window.showInformationMessage(hadQueue ? `Auggie session stopped; ${hadQueue} queued prompt(s) cleared.` : 'Auggie session stopped.');
+        }
+        else if (hadQueue) {
+            this.post({ type: 'auggieQueued', count: 0 });
+            vscode.window.showInformationMessage(`${hadQueue} queued prompt(s) cleared.`);
         }
         else {
             vscode.window.showInformationMessage('No Auggie session is running.');
@@ -3359,9 +3598,106 @@ class ChatPanel {
         }
     }
     /**
+     * Prompt enhancer: rewrite the user's raw input into a clearer, more
+     * detailed instruction and send it BACK to the composer for review — it is
+     * NEVER auto-sent (review-before-send safety rule). Uses the active backend:
+     * Auggie's read-only `--ask` mode, or a one-off Neo chat (no sessionId, so
+     * the thread isn't polluted). Best-effort; surfaces a message on failure.
+     */
+    async handleEnhancePrompt(text, model) {
+        const raw = (text || '').trim();
+        if (!raw) {
+            this.post({ type: 'promptEnhanceError', message: 'Type a prompt first, then enhance it.' });
+            return;
+        }
+        const meta = 'You are a prompt engineer. Rewrite the user instruction below into a ' +
+            'single, clear, well-structured prompt for a coding agent. Preserve ' +
+            'the original intent and every specific detail (file names, ' +
+            'constraints, tech). Make it specific and actionable: state the goal, ' +
+            'relevant context, concrete requirements, and acceptance criteria ' +
+            'where useful. Do NOT perform the task, do NOT write code, and do NOT ' +
+            'ask questions. Output ONLY the rewritten prompt as plain text — no ' +
+            'preamble, no explanation, no code fences.\n\nUSER INSTRUCTION:\n' + raw;
+        this.post({ type: 'promptEnhancing', on: true });
+        try {
+            const backend = vscode.workspace
+                .getConfiguration('agentNeo')
+                .get('agentBackend', 'neo');
+            let enhanced = '';
+            if (backend === 'auggie') {
+                const folder = vscode.workspace.workspaceFolders?.[0];
+                if (!folder) {
+                    this.post({ type: 'promptEnhanceError', message: 'Open a workspace folder to use the Auggie backend.' });
+                    return;
+                }
+                // Only forward a real Auggie model id; else let Auggie default.
+                const m = (this.selectedModel && this.auggieModelIds.has(this.selectedModel))
+                    ? this.selectedModel
+                    : '';
+                enhanced = await this.auggie.ask(folder.uri.fsPath, meta, m);
+            }
+            else {
+                // One-off Neo chat: no sessionId → keeps this out of the thread.
+                const resp = await this.apiClient.sendChatMessage(meta, undefined, undefined, undefined, model || this.selectedModel);
+                enhanced = (resp && resp.message) ? String(resp.message) : '';
+            }
+            enhanced = enhanced.trim();
+            if (enhanced) {
+                this.post({ type: 'promptEnhanced', text: enhanced });
+            }
+            else {
+                this.post({ type: 'promptEnhanceError', message: 'Enhancer returned nothing. Try again.' });
+            }
+        }
+        catch (error) {
+            this.post({ type: 'promptEnhanceError', message: 'Enhance failed: ' + (error?.message || String(error)) });
+        }
+        finally {
+            this.post({ type: 'promptEnhancing', on: false });
+        }
+    }
+    /**
+     * Push the composer model picker catalog for the ACTIVE backend: the Neo
+     * HTTP catalog, or the local Auggie CLI's own model list.
+     */
+    async pushModelCatalog() {
+        const backend = vscode.workspace
+            .getConfiguration('agentNeo')
+            .get('agentBackend', 'neo');
+        if (backend === 'auggie') {
+            await this.sendAuggieModelList();
+        }
+        else {
+            await this.sendModelList();
+        }
+    }
+    /**
+     * Fetch Auggie's model list and push it to the composer picker. Records the
+     * valid ids so runAuggie only forwards a real Auggie model via `-m`.
+     */
+    async sendAuggieModelList() {
+        try {
+            const models = await this.auggie.listModels();
+            this.auggieModelIds = new Set(models.map(m => m.id));
+            this.post({ type: 'modelList', models: [], catalog: models });
+        }
+        catch {
+            this.auggieModelIds = new Set();
+            this.post({ type: 'modelList', models: [], catalog: [] });
+        }
+    }
+    /**
      * Force a backend model/pricing refresh, then re-push the catalog.
+     * On the Auggie backend this just re-reads Auggie's own model list.
      */
     async handleRefreshModels() {
+        const backend = vscode.workspace
+            .getConfiguration('agentNeo')
+            .get('agentBackend', 'neo');
+        if (backend === 'auggie') {
+            await this.sendAuggieModelList();
+            return;
+        }
         try {
             await this.apiClient.refreshModels();
         }
