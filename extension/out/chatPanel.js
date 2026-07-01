@@ -2258,6 +2258,14 @@ class ChatPanel {
                         const message = event.data;
 
                         switch (message.type) {
+                            case 'closeSettings':
+                                // Host asked to close the settings overlay (e.g. a
+                                // terminal-agent run is starting) so the chat run
+                                // card is never hidden behind the panel.
+                                settingsView.classList.remove('open');
+                                scheduleSaveState();
+                                break;
+
                             case 'userMessage':
                                 addMessage('user', message.message);
                                 messageCount++;
@@ -2574,7 +2582,18 @@ class ChatPanel {
                                         headerEl.innerHTML = (ev.success ? '✅' : '❌') + ' <strong>AutoRun done</strong>';
                                     }
                                     if (tokensEl && ev.summary) {
-                                        tokensEl.textContent = ev.summary;
+                                        // Preserve the streamed reply/answer. If the agent
+                                        // already streamed text (e.g. Auggie's conversational
+                                        // answer), keep it and show the summary as a separate
+                                        // footer line instead of overwriting the answer.
+                                        if (tokensEl.textContent && tokensEl.textContent.trim()) {
+                                            const foot = document.createElement('div');
+                                            foot.style.cssText = 'opacity:.7;font-size:11px;padding-top:6px;margin-top:6px;border-top:1px solid var(--vscode-input-border,#333)';
+                                            foot.textContent = ev.summary;
+                                            (tokensEl.parentElement || tokensEl).appendChild(foot);
+                                        } else {
+                                            tokensEl.textContent = ev.summary;
+                                        }
                                     }
                                     // Terminal-agent post-run cards: safety → verify → suggestions.
                                     const taCard = document.getElementById('streamRunCard') || messagesDiv;
@@ -3049,7 +3068,7 @@ class ChatPanel {
     async sendToTerminalAgent(initial) {
         const settings = this.terminalAgentSettings();
         if (!(0, settings_1.isOrchestratorEnabled)(settings)) {
-            vscode.window.showWarningMessage('Terminal Agent Orchestrator is off. Enable "agentNeo.terminalAgent.enabled" first.');
+            vscode.window.showWarningMessage('Terminal Agent is off. Turn it on from the Terminal Agent settings tab first.');
             return;
         }
         if (this.orchestrator?.isRunning()) {
@@ -3063,12 +3082,18 @@ class ChatPanel {
             return;
         }
         const userRequest = initial ?? await vscode.window.showInputBox({
-            prompt: 'Describe the task for the terminal agent',
+            prompt: 'What should the terminal agent (Auggie) do?',
+            placeHolder: 'e.g. add input validation to the signup form',
             ignoreFocusOut: true,
         });
         if (!userRequest || !userRequest.trim()) {
             return;
         }
+        // Simple, visible flow: close the settings overlay and reveal the chat
+        // so the streaming run card is never hidden behind the panel. The task
+        // came straight from the user, so we run it directly — no extra review
+        // document or modal to click through.
+        this.post({ type: 'closeSettings' });
         this.show();
         this.orchestrator = new orchestratorController_1.OrchestratorController({
             post: m => this.post(m),
@@ -3076,29 +3101,9 @@ class ChatPanel {
             history: new history_1.SessionHistory(this.context.globalState),
             gatherContext: (rp, name) => (0, contextGatherer_1.gatherRunContext)(rp, name),
             getPostRunStatus: rp => (0, contextGatherer_1.getPostRunStatus)(rp),
-            reviewPrompt: p => this._reviewPromptNative(p),
+            reviewPrompt: async (p) => p,
         });
         await this.orchestrator.start(userRequest.trim(), repoPath);
-    }
-    /**
-     * Open the generated prompt in an editor for review/edit, then ask
-     * Send / Copy / Cancel. Returns the (possibly edited) prompt, or undefined
-     * if the user cancels. No input is ever sent without this explicit Send.
-     */
-    async _reviewPromptNative(prompt) {
-        const doc = await vscode.workspace.openTextDocument({ content: prompt, language: 'markdown' });
-        const editor = await vscode.window.showTextDocument(doc, { preview: false });
-        for (;;) {
-            const choice = await vscode.window.showInformationMessage('Review the generated prompt, then send it to the terminal agent?', { modal: true }, 'Send', 'Copy');
-            if (choice === 'Copy') {
-                await vscode.env.clipboard.writeText(editor.document.getText());
-                continue;
-            }
-            if (choice === 'Send') {
-                return editor.document.getText();
-            }
-            return undefined;
-        }
     }
     /** Stop the active terminal-agent run, if any. */
     stopTerminalAgent() {

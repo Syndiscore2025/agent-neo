@@ -68,7 +68,10 @@ async function gatherRunContext(repoPath, providerName) {
     const [branch, status, log] = await Promise.all([
         git(['rev-parse', '--abbrev-ref', 'HEAD'], repoPath),
         git(['status', '--porcelain'], repoPath),
-        git(['log', '--oneline', '-n', '5'], repoPath),
+        // Same depth as getPostRunStatus (20) so the pre/post commit diff only
+        // reports commits genuinely created during the run — not pre-existing
+        // history that simply falls outside a shorter pre-run window.
+        git(['log', '--oneline', '-n', '20'], repoPath),
     ]);
     const summary = (0, gitParse_1.summarizeGitStatus)(status);
     return {
@@ -76,7 +79,7 @@ async function gatherRunContext(repoPath, providerName) {
         currentBranch: branch.trim() || undefined,
         gitStatus: status.trim() || undefined,
         changedFiles: summary.changedFiles.length ? summary.changedFiles : undefined,
-        recentCommits: (0, gitParse_1.parseRecentCommits)(log),
+        recentCommits: (0, gitParse_1.parseRecentCommits)(log, 20),
         openFiles: openFiles(),
         providerName,
         dateTime: new Date().toISOString(),
